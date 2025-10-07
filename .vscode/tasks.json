@@ -1,0 +1,49 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Upload FileSystem",
+			"type": "shell",
+			"command": "C:\\Users\\60027\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--target",
+				"uploadfs",
+				"--environment",
+				"m5stack-atom"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build (PlatformIO m5stack-atom)",
+			"type": "shell",
+			"command": "C:\\Users\\60027\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--environment",
+				"m5stack-atom"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build (PlatformIO m5stack-atom) - verbose",
+			"type": "shell",
+			"command": "C:\\Users\\60027\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--environment",
+				"m5stack-atom",
+				"-v"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		}
+	]
+}

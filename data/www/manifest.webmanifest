@@ -1,0 +1,17 @@
+{
+  "name": "KDS - Kitchen Display System",
+  "short_name": "KDS",
+  "description": "厨房表示システム - 注文管理・キッチン表示・品出し管理",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#111",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='40' fill='%23111'/%3E%3Ctext x='50' y='60' text-anchor='middle' fill='white' font-size='40' font-family='sans-serif'%3EK%3C/text%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}

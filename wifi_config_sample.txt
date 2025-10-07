@@ -1,0 +1,18 @@
+// WiFi設定例（main.cppの該当行を編集してください）
+
+// 家庭用WiFi設定（NTP時刻同期用）
+const char* sta_ssid = "YourWiFiName";         // お使いのWiFi SSID
+const char* sta_password = "YourWiFiPassword"; // お使いのWiFiパスワード
+
+例:
+const char* sta_ssid = "MyHomeWiFi";
+const char* sta_password = "mypassword123";
+
+設定後:
+1. コンパイル・アップロード
+2. ESP32がWiFiに接続されると自動でNTP時刻同期
+3. 正確な時刻でレシート印刷が可能
+
+確認方法:
+- シリアルモニターで "NTP時刻同期成功" のメッセージ
+- "現在時刻: 2025/09/28 XX:XX:XX" の表示
