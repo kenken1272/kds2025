@@ -3,9 +3,6 @@
 
 AsyncWebSocket ws("/ws");
 
-/**
- * WebSocketイベントハンドラ
- */
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
                AwsEventType type, void *arg, uint8_t *data, size_t len) {
     
@@ -13,7 +10,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         case WS_EVT_CONNECT:
             Serial.printf("WebSocket クライアント接続: %u\n", client->id());
             
-            // hello メッセージを送信
             {
                 JsonDocument doc;
                 doc["type"] = "hello";
@@ -29,7 +25,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
             break;
             
         case WS_EVT_DATA:
-            // 将来のメッセージ処理拡張ポイント
             Serial.printf("WebSocket データ受信: %u\n", client->id());
             break;
             

@@ -2,9 +2,6 @@
 #include <M5Unified.h>
 #include <time.h>
 
-// -----------------------------------------------------------------------------
-// デバッグ用：HEXダンプ & 低レベル送信ヘルパ（Hello World疎通テスト用）
-// -----------------------------------------------------------------------------
 static void _hexDump(const uint8_t* p, size_t n, const char* tag) {
   if (!p || n==0) { Serial.printf("[PRINT][DUMP] %s len=0 (null)\n", tag?tag:"?"); return; }
   Serial.printf("[PRINT][DUMP] %s len=%u : ", tag?tag:"?", (unsigned)n);
@@ -18,7 +15,6 @@ static void _hexDump(const uint8_t* p, size_t n, const char* tag) {
 static void _sendBytesDebug(HardwareSerial* ser, const uint8_t* p, size_t n, const char* tag){
   if (!ser) return; _hexDump(p,n,tag); size_t w = ser->write(p,n); ser->flush(); Serial.printf("[PRINT][SEND](debug) %s wrote %u/%u bytes\n", tag?tag:"?", (unsigned)w,(unsigned)n); delay(10); }
 
-// 成功判定付き送信（本タスク追加）
 static bool _sendBytesChecked(HardwareSerial* ser, const uint8_t* p, size_t n, const char* tag) {
   if (!ser || !p || !n) return false;
   size_t w = ser->write(p, n);
@@ -36,16 +32,11 @@ static void _sendLineASCII(HardwareSerial* ser, const String& s){
   ser->flush();
 }
 
-// ---- 外部関数（main.cpp で定義）----
 extern String getCurrentDateTime();
 extern bool   isTimeValid();
 
-// ---- グローバル ----
 PrinterRenderer g_printerRenderer;
 
-// =============================================================================
-// コンストラクタ / 共通
-// =============================================================================
 PrinterRenderer::PrinterRenderer() = default;
 PrinterRenderer::~PrinterRenderer() { cleanup(); }
 
@@ -55,7 +46,6 @@ bool PrinterRenderer::initialize(HardwareSerial* serial) {
     Serial.println("[PRINT] Error: Invalid printer serial");
     return false;
   }
-  // Default baud unified to 115200bps (ESP32 RX=23, TX=33)
   baud_  = 115200;
   printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
   ready_ = true;
@@ -70,9 +60,6 @@ void PrinterRenderer::cleanup() {
 
 bool PrinterRenderer::isReady() const { return ready_ && printerSerial_ != nullptr; }
 
-// =============================================================================
-// 初期化 / コマンド
-// =============================================================================
 void PrinterRenderer::printerInit() {
   if (!isReady()) {
     Serial.println("[PRINT] Error: printer serial not ready");
@@ -80,17 +67,16 @@ void PrinterRenderer::printerInit() {
   }
 
   Serial.printf("[PRINT] ATOM Printer init @ %dbps (ESP32 RX=%d, TX=%d)\n", baud_, PRN_RX, PRN_TX);
-  // begin(baud,config,RX,TX) 順序注意
   printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
 
   delay(200);
   while (printerSerial_->available()) { printerSerial_->read(); }
   printerSerial_->flush();
 
-  const uint8_t ESC_AT[]     = {0x1B, 0x40};               // リセット
-  const uint8_t ESC_R_USA[]  = {0x1B, 0x52, 0x00};         // 国際文字=USA
-  const uint8_t ESC_T_437[]  = {0x1B, 0x74, 0x00};         // コードページ=PC437
-  const uint8_t ESC_3_LS[]   = {0x1B, 0x33, (uint8_t)LINE_SPACING}; // 行間
+  const uint8_t ESC_AT[]     = {0x1B, 0x40};
+  const uint8_t ESC_R_USA[]  = {0x1B, 0x52, 0x00};
+  const uint8_t ESC_T_437[]  = {0x1B, 0x74, 0x00};
+  const uint8_t ESC_3_LS[]   = {0x1B, 0x33, (uint8_t)LINE_SPACING};
 
   _sendBytesChecked(printerSerial_, ESC_AT,    sizeof(ESC_AT),    "ESC @ (reset)");
   _sendBytesChecked(printerSerial_, ESC_R_USA, sizeof(ESC_R_USA), "ESC R 0 (USA)");
@@ -111,16 +97,16 @@ void PrinterRenderer::updateBaudRate(int baudRate) {
   delay(80);
   printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
   delay(120);
-  printerInit(); // コードページ再設定
+  printerInit();
 }
 
 void PrinterRenderer::sendFeedLines(int lines) {
   if (!isReady() || lines <= 0) return;
   while (lines > 0) {
     uint8_t chunk = (uint8_t)min(lines, 255);
-    const uint8_t feed[] = {0x1B, 0x64, chunk}; // ESC d n
+    const uint8_t feed[] = {0x1B, 0x64, chunk};
     _sendBytesChecked(printerSerial_, feed, sizeof(feed), "ESC d n");
-    delay(80 * chunk); // 推奨：1行 ~80ms
+    delay(80 * chunk);
     lines -= chunk;
   }
 }
@@ -128,14 +114,11 @@ void PrinterRenderer::sendFeedLines(int lines) {
 void PrinterRenderer::sendCutCommand() {
   if (!isReady()) return;
   sendFeedLines(4);
-  const uint8_t cut[] = {0x1D, 0x56, 0x42, 0x00}; // GS V B m=0x00 full cut
+  const uint8_t cut[] = {0x1D, 0x56, 0x42, 0x00};
   _sendBytesChecked(printerSerial_, cut, sizeof(cut), "GS V B 0");
   Serial.println("[PRINT] Cut command issued");
 }
 
-// =============================================================================
-// ASCII 整形 & 送信
-// =============================================================================
 String PrinterRenderer::toASCII(const String& s) {
   String out; out.reserve(s.length());
   for (size_t i=0; i<s.length(); ++i) {
@@ -158,20 +141,15 @@ void PrinterRenderer::writeLineASCII(const String& s) {
   printerSerial_->write((const uint8_t*)&nl, 1);
 }
 
-// =============================================================================
-// ラスタ用：モノクロ変換（行方向に詰める：widthBytes * height）
-// =============================================================================
 std::vector<uint8_t> PrinterRenderer::buildMonoBand(M5Canvas& sp, int startY, int height) const {
   const int width      = DOT_WIDTH;
   const int widthBytes = (width + 7) / 8;
   std::vector<uint8_t> out(widthBytes * height, 0);
 
-  // readPixelで安全に取る（速度より堅牢性優先）
   for (int y = 0; y < height; ++y) {
     int srcY = startY + y;
     for (int x = 0; x < width; ++x) {
       uint16_t p = sp.readPixel(x, srcY);
-      // 白背景前提。明度しきい値で2値化（128未満=黒）
       uint8_t r = ((p >> 11) & 0x1F) * 8;
       uint8_t g = ((p >> 5)  & 0x3F) * 4;
       uint8_t b = ( p        & 0x1F) * 8;
@@ -179,24 +157,19 @@ std::vector<uint8_t> PrinterRenderer::buildMonoBand(M5Canvas& sp, int startY, in
       if (lum < 128) {
         int byteIndex = y * widthBytes + (x >> 3);
         int bitIndex  = 7 - (x & 7);
-        out[byteIndex] |= (1 << bitIndex); // 1=黒
+        out[byteIndex] |= (1 << bitIndex);
       }
     }
   }
   return out;
 }
 
-// =============================================================================
-// ラスタ送信（GS v 0）
-// =============================================================================
 void PrinterRenderer::sendRasterBand(const uint8_t* data, int bytesPerRow, int height) {
   if (!isReady() || !data || height <= 0) return;
 
-  // GS v 0 m=0 : 正立, 通常密度
   const uint8_t hdr[] = {0x1D, 0x76, 0x30, 0x00};
   printerSerial_->write(hdr, sizeof(hdr));
 
-  // xL xH : 横バイト数, yL yH : 縦ドット数
   const uint8_t xL = (uint8_t)(bytesPerRow & 0xFF);
   const uint8_t xH = (uint8_t)((bytesPerRow >> 8) & 0xFF);
   const uint8_t yL = (uint8_t)(height & 0xFF);
@@ -205,13 +178,11 @@ void PrinterRenderer::sendRasterBand(const uint8_t* data, int bytesPerRow, int h
   printerSerial_->write(xL); printerSerial_->write(xH);
   printerSerial_->write(yL); printerSerial_->write(yH);
 
-  // データ本体（行方向にそのまま）
   const size_t total = (size_t)bytesPerRow * (size_t)height;
   printerSerial_->write(data, total);
   printerSerial_->flush();
 
-  // 軽いウェイト
-  delay(10 + height); // 高さに応じて少し待つ
+  delay(10 + height);
 }
 
 bool PrinterRenderer::sendSpriteAsRaster(M5Canvas& sp) {
@@ -248,7 +219,7 @@ bool PrinterRenderer::printSelfCheck() {
   canvas.drawString("=== SELF CHECK ===", 10, y); y += 26;
   canvas.fillRect(10, y, DOT_WIDTH-20, 12, TFT_BLACK); y += 22;
 
-  // チェッカ
+
   for (int r=0; r<5; ++r) {
     for (int c=0; c<16; ++c) {
       if (((r^c)&1)==0) canvas.fillRect(10+c*22, y+r*10, 18, 8, TFT_BLACK);
@@ -267,9 +238,6 @@ bool PrinterRenderer::printSelfCheck() {
   return ok;
 }
 
-// =============================================================================
-// レイアウト（日本語はCanvas上に描画）
-// =============================================================================
 int PrinterRenderer::drawStoreName(M5Canvas& sp, const String& name, int y) {
   sp.setTextDatum(textdatum_t::top_center);
   sp.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -280,18 +248,16 @@ int PrinterRenderer::drawStoreName(M5Canvas& sp, const String& name, int y) {
 }
 
 int PrinterRenderer::drawOrderNumber(M5Canvas& sp, const String& orderNo, int y) {
-  // 注文番号を特大表示（サイズ4、太字、中央寄せ）
   sp.setTextDatum(textdatum_t::top_center);
   sp.setTextColor(TFT_BLACK, TFT_WHITE);
   sp.setFont(&fonts::Font7);
-  sp.setTextSize(4); // サイズを3→4へアップ
+  sp.setTextSize(4);
   
-  // 上下に余白を追加
   y += 10;
   sp.drawString("Order No.", DOT_WIDTH/2, y);
-  y += 56; // フォントサイズに合わせて調整
+  y += 56;
   sp.drawString(orderNo, DOT_WIDTH/2, y);
-  y += 56 + 10; // 下余白
+  y += 56 + 10;
   
   return y + 8;
 }
@@ -349,21 +315,12 @@ int PrinterRenderer::drawFooter(M5Canvas& sp, const String& footer, int y) {
   return y + 18 + 16;
 }
 
-// =============================================================================
-// 日本語レシート（Canvas→ラスタ）
-// =============================================================================
-// =============================================================================
-// 日本語レシート（小分割スプライト方式）
-// メモリ節約：各セクションを個別に生成→送信→破棄
-// =============================================================================
 bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
   if (!isReady()) return false;
   printerInit();
 
-  // 小スプライト送信＋破棄ユーティリティ（private メソッドへは this 経由で可）
   auto sendAndDelete = [&](M5Canvas& sp){ bool ok = sendSpriteAsRaster(sp); sp.deleteSprite(); return ok; };
 
-  // 1) 見出し（店名＋注文番号）
   {
     M5Canvas sp(&M5.Display);
     sp.setColorDepth(16);
@@ -375,7 +332,6 @@ bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
   if (!sendAndDelete(sp)) return false;
   }
 
-  // 2) セパレータ
     {
     M5Canvas sp(&M5.Display);
     sp.setColorDepth(16);
@@ -386,26 +342,24 @@ bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
   if (!sendAndDelete(sp)) return false;
   }
 
-  // 3) 商品行（1行ずつ）
   for (size_t i = 0; i < od.itemsRomaji.size(); ++i) {
     M5Canvas sp(&M5.Display);
     sp.setColorDepth(16);
     sp.createSprite(DOT_WIDTH, 28);
     sp.fillScreen(TFT_WHITE);
 
-    PrintOrderData tmp; // 一行だけのデータコンテナ
+    PrintOrderData tmp;
     if (i < od.items.size())       tmp.items.push_back(od.items[i]);
     if (i < od.itemsRomaji.size()) tmp.itemsRomaji.push_back(od.itemsRomaji[i]);
     if (i < od.quantities.size())  tmp.quantities.push_back(od.quantities[i]);
     if (i < od.prices.size())      tmp.prices.push_back(od.prices[i]);
 
     int y = 2;
-    y = drawItemsJP(sp, tmp, y); // 1行分
+    y = drawItemsJP(sp, tmp, y);
     (void)y;
   if (!sendAndDelete(sp)) return false;
   }
 
-  // 4) セパレータ
   {
     M5Canvas sp(&M5.Display);
     sp.setColorDepth(16);
@@ -416,7 +370,6 @@ bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
   if (!sendAndDelete(sp)) return false;
   }
 
-  // 5) 合計
   {
     M5Canvas sp(&M5.Display);
     sp.setColorDepth(16);
@@ -427,7 +380,6 @@ bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
   if (!sendAndDelete(sp)) return false;
   }
 
-  // 6) 日時
   {
     M5Canvas sp(&M5.Display);
     sp.setColorDepth(16);
@@ -438,7 +390,6 @@ bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
   if (!sendAndDelete(sp)) return false;
   }
 
-  // 7) フッタ
   {
     M5Canvas sp(&M5.Display);
     sp.setColorDepth(16);
@@ -455,21 +406,17 @@ bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
 }
 
 bool PrinterRenderer::printReceiptJP(const Order& order) {
-  // Order -> PrintOrderData 変換（romaji名を採用）
   PrintOrderData od;
   od.orderNo    = order.orderNo;
   od.storeName  = S().settings.store.nameRomaji;
   od.footerMessage = "Thank you!";
 
-  // 日時
   od.dateTime = isTimeValid() ? getCurrentDateTime() : "Time not synced";
 
   int total = 0;
   for (const auto& it : order.items) {
-    // 調整行（ちんちろ等）も印刷対象に含める
     String romaji = it.name;
     
-    // ADJUST以外はメニューからローマ字名を引く
     if (it.kind != "ADJUST") {
       for (const auto& m : S().menu) {
         if (m.sku == it.sku || m.name == it.name) { romaji = m.nameRomaji; break; }
@@ -489,10 +436,6 @@ bool PrinterRenderer::printReceiptJP(const Order& order) {
   od.totalAmount = total;
   return printReceiptJP(od);
 }
-
-// =============================================================================
-// 英語テスト / 日本語テスト
-// =============================================================================
 bool PrinterRenderer::printEnglishTest() {
   if (!isReady()) return false;
   printerInit();
@@ -512,7 +455,7 @@ bool PrinterRenderer::printEnglishTest() {
   sendStr("Thank you!");
   sendFeedLines(4);
   sendCutCommand();
-  return any; // 1行も成功していなければ false
+  return any; 
 }
 
 bool PrinterRenderer::printJapaneseTest() {
@@ -521,27 +464,23 @@ bool PrinterRenderer::printJapaneseTest() {
 
   auto sendAndDelete = [&](M5Canvas& sp){ bool ok = sendSpriteAsRaster(sp); sp.deleteSprite(); return ok; };
 
-  // 見出し
   {
     M5Canvas sp(&M5.Display); sp.setColorDepth(16); sp.createSprite(DOT_WIDTH, 60); sp.fillScreen(TFT_WHITE);
     sp.setTextColor(TFT_BLACK, TFT_WHITE); sp.setTextDatum(textdatum_t::top_center); sp.setFont(&fonts::Font7); sp.setTextSize(1);
     sp.drawString("九大料理サークルきゅう食", DOT_WIDTH/2, 6);
   if (!sendAndDelete(sp)) return false;
   }
-  // 注文番号
   {
     M5Canvas sp(&M5.Display); sp.setColorDepth(16); sp.createSprite(DOT_WIDTH, 48); sp.fillScreen(TFT_WHITE);
     sp.setTextColor(TFT_BLACK, TFT_WHITE); sp.setTextDatum(textdatum_t::top_left); sp.setFont(&fonts::Font7); sp.setTextSize(2);
     sp.drawString("注文番号 55番", 10, 4);
   if (!sendAndDelete(sp)) return false;
   }
-  // セパレータ
   {
     M5Canvas sp(&M5.Display); sp.setColorDepth(16); sp.createSprite(DOT_WIDTH, 24); sp.fillScreen(TFT_WHITE);
     sp.drawFastHLine(10, 12, DOT_WIDTH-20, TFT_BLACK);
   if (!sendAndDelete(sp)) return false;
   }
-  // 行描画ラムダ
   auto _line = [&](const String& left, const String& right) {
     M5Canvas sp(&M5.Display); sp.setColorDepth(16); sp.createSprite(DOT_WIDTH, 28); sp.fillScreen(TFT_WHITE);
     sp.setFont(&fonts::Font6); sp.setTextSize(1); sp.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -551,20 +490,17 @@ bool PrinterRenderer::printJapaneseTest() {
   };
   if (!_line("照り焼きバーガー", "x1   800yen")) return false;
   if (!_line("きゅう食バーガー", "x1   700yen")) return false;
-  // セパレータ
   {
     M5Canvas sp(&M5.Display); sp.setColorDepth(16); sp.createSprite(DOT_WIDTH, 24); sp.fillScreen(TFT_WHITE);
     sp.drawFastHLine(10, 12, DOT_WIDTH-20, TFT_BLACK);
   if (!sendAndDelete(sp)) return false;
   }
-  // 合計
   {
     M5Canvas sp(&M5.Display); sp.setColorDepth(16); sp.createSprite(DOT_WIDTH, 32); sp.fillScreen(TFT_WHITE);
     sp.setFont(&fonts::Font7); sp.setTextSize(1); sp.setTextColor(TFT_BLACK, TFT_WHITE); sp.setTextDatum(textdatum_t::top_right);
     sp.drawString("合計 1500円", DOT_WIDTH-10, 6);
   if (!sendAndDelete(sp)) return false;
   }
-  // 日時
   {
     M5Canvas sp(&M5.Display); sp.setColorDepth(16); sp.createSprite(DOT_WIDTH, 26); sp.fillScreen(TFT_WHITE);
     sp.setFont(&fonts::Font6); sp.setTextSize(1); sp.setTextColor(TFT_BLACK, TFT_WHITE); sp.setTextDatum(textdatum_t::top_center);
@@ -576,16 +512,11 @@ bool PrinterRenderer::printJapaneseTest() {
   sendCutCommand();
   return true;
 }
-
-// =============================================================================
-// ESC * 専用の黒バー自己診断（任意）
-// =============================================================================
 bool PrinterRenderer::printSelfCheckEscStar() {
   if (!isReady()) return false;
 
   printerInit();
 
-  // 真っ黒バー 384x120 を ESC * で送る（参考用）
   M5Canvas bar(&M5.Display);
   bar.setColorDepth(16);
   bar.createSprite(DOT_WIDTH, 120);
@@ -594,8 +525,6 @@ bool PrinterRenderer::printSelfCheckEscStar() {
   const int widthBytes = (DOT_WIDTH + 7) / 8;
   auto band = buildMonoBand(bar, 0, 120);
 
-  // ESC * 24-dot（m=33）で縦方向に送るため、転置して送信
-  // ここでは簡便のため 24ラインごとに3バイト×横ドットで送る
   for (int y0=0; y0<120; y0+=24) {
     int blockH = min(24, 120 - y0);
     const uint8_t hdr[] = {0x1B, 0x2A, 33, (uint8_t)(DOT_WIDTH & 0xFF), (uint8_t)(DOT_WIDTH >> 8)};
@@ -626,9 +555,6 @@ bool PrinterRenderer::printSelfCheckEscStar() {
   bar.deleteSprite();
   return true;
 }
-
-
-// =============================================================================
 bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
   if (!isReady()) return false;
   printerInit();
@@ -639,9 +565,8 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
   sendLine("==============================");
   sendLine("");
   
-  // 注文番号を特大表示（GS ! n で 2倍幅×2倍高）
-  const uint8_t D_W_H[] = {0x1D, 0x21, 0x11};  // GS ! 0x11 (2x width, 2x height)
-  const uint8_t D_RESET[] = {0x1D, 0x21, 0x00}; // GS ! 0x00 (reset to normal)
+  const uint8_t D_W_H[] = {0x1D, 0x21, 0x11};
+  const uint8_t D_RESET[] = {0x1D, 0x21, 0x00};
   _sendBytesChecked(printerSerial_, D_W_H, sizeof(D_W_H), "GS ! 0x11 (double size)");
   sendLine("Order No. " + toASCII(od.orderNo));
   _sendBytesChecked(printerSerial_, D_RESET, sizeof(D_RESET), "GS ! 0x00 (reset size)");
@@ -653,74 +578,59 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
     int qty     = (i < od.quantities.size())  ? od.quantities[i]  : 1;
     int unit    = (i < od.prices.size())      ? od.prices[i]      : 0;
     
-    // 項目名を15文字に制限してパディング
     if (name.length() > 15) name = name.substring(0, 15);
     while (name.length() < 15) name += " ";
     
-    // 数量部分（4文字固定）
     String qtyStr = "x" + String(qty);
     while (qtyStr.length() < 4) qtyStr = " " + qtyStr;
     
-    // 金額部分（右寄せ、8文字固定、負の値にも対応）
     String priceStr = String(unit) + "yen";
     while (priceStr.length() < 8) priceStr = " " + priceStr;
     
-    // 整列した行を作成: "NAME           x1    100yen" or "NAME           x1   -100yen"
     sendLine(name + qtyStr + priceStr);
   }
   sendLine("------------------------------");
   
-  // 合計金額も右寄せで整列
   String totalLabel = "TOTAL";
-  while (totalLabel.length() < 19) totalLabel += " "; // 15+4文字分の空白
+  while (totalLabel.length() < 19) totalLabel += " ";
   String totalPrice = String(od.totalAmount) + "yen";
   while (totalPrice.length() < 8) totalPrice = " " + totalPrice;
   sendLine(totalLabel + totalPrice);
   sendLine(isTimeValid() ? getCurrentDateTime() : "Time not synced");
   sendLine(toASCII(od.footerMessage));
   
-  // QRコード印刷（設定で有効な場合）
   if (S().settings.qrPrint.enabled && S().settings.qrPrint.content.length() > 0) {
-    sendLine(""); // 空行
-    // 中央寄せ（ESC a 1）
+    sendLine("");
     const uint8_t centerAlign[] = {0x1B, 0x61, 0x01};
     _sendBytesChecked(printerSerial_, centerAlign, sizeof(centerAlign), "Center align");
     
-    // QRコード印刷
     printQRCode(S().settings.qrPrint.content);
     
-    // 左寄せに戻す（ESC a 0）
     const uint8_t leftAlign[] = {0x1B, 0x61, 0x00};
     _sendBytesChecked(printerSerial_, leftAlign, sizeof(leftAlign), "Left align");
-    sendLine(""); // 空行
+    sendLine("");
   }
   
   sendFeedLines(4);
   sendCutCommand();
-  return any; // 少なくとも1行送れていなければ false
+  return any;
 }
 
-// Order から英語レシート用 PrintOrderData を生成して既存実装へ委譲
 bool PrinterRenderer::printReceiptEN(const Order& order) {
   if (!isReady()) return false;
 
   PrintOrderData od;
   od.orderNo       = order.orderNo;
-  od.storeName     = S().settings.store.nameRomaji; // 英語店名（ローマ字）
+  od.storeName     = S().settings.store.nameRomaji;
   od.footerMessage = "Thank you!";
   od.dateTime      = isTimeValid() ? getCurrentDateTime() : "Time not synced";
 
   int total = 0;
   for (const auto& it : order.items) {
-    // 調整行（ちんちろ等）も印刷対象に含める
     String romaji = it.name;
     
     if (it.kind == "ADJUST") {
-      // ADJUST行はローマ字に変換
-      // "Chinchiro (xxx)" の形式を保持
-      // それ以外の調整は "Adjustment" に
       if (it.name.indexOf("Chinchiro") >= 0) {
-        // 既に "Chinchiro (ピンゾロ)" の形式なのでそのまま使用（ASCII部分のみ）
         romaji = toASCII(it.name);
       } else if (it.name.indexOf("ちんちろ") >= 0) {
         romaji = "Chinchiro Adj";
@@ -728,30 +638,24 @@ bool PrinterRenderer::printReceiptEN(const Order& order) {
         romaji = "Adjustment";
       }
     } else {
-      // 通常商品はメニューからローマ字名を引く
       for (const auto& m : S().menu) {
         if (m.sku == it.sku || m.name == it.name) { romaji = m.nameRomaji; break; }
       }
     }
 
-    // 価格計算（負の値も正しく処理）
     int unit = (it.unitPriceApplied != 0) ? it.unitPriceApplied : it.unitPrice;
     int qty  = it.qty > 0 ? it.qty : 1;
     int sub  = unit * qty - (it.discountValue > 0 ? it.discountValue : 0);
 
     od.itemsRomaji.push_back(romaji);
     od.quantities.push_back(qty);
-    od.prices.push_back(unit); // unitPriceは負の値も含む
+    od.prices.push_back(unit);
     total += sub;
   }
   od.totalAmount = total;
 
-  return printReceiptEN(od); // 既存 PrintOrderData 版へ
+  return printReceiptEN(od);
 }
-
-// =============================================================================
-// QRコード印刷（ESC/POS QRコードコマンド）
-// =============================================================================
 bool PrinterRenderer::printQRCode(const String& content) {
   if (!isReady()) {
     Serial.println("[PRINT] QR NG: not initialized");
@@ -765,31 +669,16 @@ bool PrinterRenderer::printQRCode(const String& content) {
   
   Serial.printf("[PRINT] QR: printing \"%s\" (len=%d)\n", content.c_str(), content.length());
   
-  // ESC/POS QRコードコマンドシーケンス
-  // GS ( k <Function 165> - QRコード印刷（モデル2）
-  
-  // 1. QRコードモデル設定 (Model 2)
-  // GS ( k pL pH cn fn n1 n2
-  // cn=49, fn=65, n1=n2=0 (Model 2)
   const uint8_t setModel[] = {0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00};
   _sendBytesChecked(printerSerial_, setModel, sizeof(setModel), "QR Model");
   
-  // 2. QRコードサイズ設定（セルサイズ）
-  // GS ( k pL pH cn fn n
-  // cn=49, fn=67, n=3–8 (ドット数)
-  const uint8_t setSize[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, 0x05}; // size=5
+  const uint8_t setSize[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, 0x05};
   _sendBytesChecked(printerSerial_, setSize, sizeof(setSize), "QR Size");
   
-  // 3. QRコード誤り訂正レベル設定
-  // GS ( k pL pH cn fn n
-  // cn=49, fn=69, n=48(L), 49(M), 50(Q), 51(H)
-  const uint8_t setECC[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, 0x31}; // level M
+  const uint8_t setECC[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, 0x31};
   _sendBytesChecked(printerSerial_, setECC, sizeof(setECC), "QR ECC");
   
-  // 4. QRコードデータ格納
-  // GS ( k pL pH cn fn m [data]
-  // cn=49, fn=80, m=48
-  int dataLen = content.length() + 3; // +3 for cn fn m
+  int dataLen = content.length() + 3;
   uint8_t pL = dataLen & 0xFF;
   uint8_t pH = (dataLen >> 8) & 0xFF;
   
@@ -798,34 +687,27 @@ bool PrinterRenderer::printQRCode(const String& content) {
   printerSerial_->write(0x6B);
   printerSerial_->write(pL);
   printerSerial_->write(pH);
-  printerSerial_->write(0x31); // cn
-  printerSerial_->write(0x50); // fn
-  printerSerial_->write(0x30); // m
+  printerSerial_->write(0x31);
+  printerSerial_->write(0x50);
+  printerSerial_->write(0x30);
   printerSerial_->write((const uint8_t*)content.c_str(), content.length());
   printerSerial_->flush();
   Serial.printf("[PRINT][SEND] QR Data wrote %d bytes\n", content.length() + 8);
   delay(50);
   
-  // 5. QRコード印刷実行
-  // GS ( k pL pH cn fn m
-  // cn=49, fn=81, m=48
   const uint8_t printQR[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30};
   _sendBytesChecked(printerSerial_, printQR, sizeof(printQR), "QR Print");
   
-  delay(100); // QR印刷待機
+  delay(100);
   
   Serial.println("[PRINT] QR: print command sent");
   return true;
 }
-
-// =============================================================================
-// 超ミニ疎通テスト（ASCIIのみ / ビットマップ未使用 / 大量HEXダンプ）
-// =============================================================================
 bool PrinterRenderer::printHelloWorldTest() {
   if (!isReady()) { Serial.println("[PRINT] NG: not initialized"); return false; }
   Serial.println("========== HELLO TEST START ==========");
   Serial.printf("[PRINT] UART: %d bps (ESP32 RX=%d, TX=%d)\n", baud_, PRN_RX, PRN_TX);
-  printerInit(); // 既定初期化（再begin含む）
+  printerInit();
   bool any=false;
   auto sendAscii=[&](const char* s){ String line=String(s)+"\n"; bool ok=_sendBytesChecked(printerSerial_, (const uint8_t*)line.c_str(), line.length(), "HELLO"); any = any || ok; };
   sendAscii("HELLO WORLD");

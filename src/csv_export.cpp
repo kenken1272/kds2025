@@ -2,7 +2,6 @@
 #include "csv_export.h"
 #include "store.h"
 
-// UTF-8 BOM
 static inline void writeBOM(AsyncResponseStream *res) {
   static const uint8_t bom[3] = {0xEF,0xBB,0xBF};
   res->write(bom, 3);

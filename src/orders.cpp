@@ -20,9 +20,7 @@ int calculateChinchoiroAdjustment(int setSubtotal, float multiplier, const Strin
 
 Order buildOrderFromClientJson(const JsonDocument& req){
   Order o;
-  // ★ 採番は明細構築成功後に移動
   
-  // ArduinoJson v7対応: const参照の問題を回避するため、コピーを作成
   JsonDocument doc;
   doc.set(req);
 
@@ -41,15 +39,12 @@ Order buildOrderFromClientJson(const JsonDocument& req){
     return nullptr;
   };
 
-  // v7対応：安全な型チェックと取得
   Serial.println("buildOrderFromClientJson開始");
   
-  // デバッグ: 受信したJSONの内容を確認
   String debugJson;
   serializeJson(doc, debugJson);
   Serial.printf("buildOrderFromClientJson内で受信したJSON: %s\n", debugJson.c_str());
   
-  // lines要素の存在確認（コピーしたdocを使用）
   Serial.printf("doc[\"lines\"]の型チェック:\n");
   Serial.printf("  doc.containsKey(\"lines\"): %s\n", doc["lines"].is<JsonArray>() ? "true" : "false");
   Serial.printf("  doc[\"lines\"].is<JsonArray>(): %s\n", doc["lines"].is<JsonArray>() ? "true" : "false");
@@ -84,7 +79,6 @@ Order buildOrderFromClientJson(const JsonDocument& req){
           continue;
         }
 
-        // MAIN 行
         LineItem lm;
         lm.sku = mainSku; lm.name = main->name; lm.qty = qty; lm.kind = "MAIN";
         lm.priceMode = (pm == "presale") ? "presale" : "normal";
@@ -96,8 +90,7 @@ Order buildOrderFromClientJson(const JsonDocument& req){
         Serial.printf("MAIN追加: %s x%d (%d円) [%s]\n", 
                      lm.name.c_str(), lm.qty, lm.unitPriceApplied, lm.kind.c_str());
 
-        // sideSkus
-        int setSubtotal = base; // MAIN価格を初期値として設定
+        int setSubtotal = base;
         if (v["sideSkus"].is<JsonArray>()) {
           JsonArray sides = v["sideSkus"].as<JsonArray>();
           Serial.printf("sideSkus処理開始 - サイズ: %d\n", sides.size());
@@ -119,7 +112,7 @@ Order buildOrderFromClientJson(const JsonDocument& req){
             ls.sku = sideSku; ls.name = side->name; ls.qty = qty; ls.kind = "SIDE_AS_SET"; ls.priceMode = "";
             ls.unitPriceApplied = ls.unitPrice = side->price_as_side;
             o.items.push_back(ls);
-            setSubtotal += side->price_as_side; // SETの小計に加算
+            setSubtotal += side->price_as_side;
             Serial.printf("SIDE追加: %s x%d (%d円) [%s]\n", 
                          ls.name.c_str(), ls.qty, ls.unitPriceApplied, ls.kind.c_str());
           }
@@ -127,7 +120,6 @@ Order buildOrderFromClientJson(const JsonDocument& req){
           Serial.println("sideSkus配列が存在しないかNULL");
         }
         
-        // ちんちろ調整（SET商品のみ）
         if (S().settings.chinchiro.enabled && v["chinchoiroMultiplier"].is<float>()) {
           float multiplier = v["chinchoiroMultiplier"].as<float>();
           const char* resultCStr = v["chinchoiroResult"] | "";
@@ -153,7 +145,6 @@ Order buildOrderFromClientJson(const JsonDocument& req){
         }
       }
       else if (strcmp(type, "MAIN_SINGLE") == 0){
-        // メイン商品単品
         const char* mainSkuCStr = v["mainSku"] | "";
         const char* pmCStr = v["priceMode"] | "normal";
         String mainSku = String(mainSkuCStr);
@@ -202,19 +193,16 @@ Order buildOrderFromClientJson(const JsonDocument& req){
     Serial.println("エラー: lines配列が存在しないか配列でない！");
   }
 
-  // ★ 明細が空の場合は採番せずに返す
   if (o.items.empty()) {
     Serial.println("エラー: 明細が空のため注文を生成しません");
-    return o; // orderNo未設定のまま
+    return o;
   }
 
-  // ★ 明細が確定したタイミングで初めて採番＆状態設定
   o.orderNo = allocateOrderNo();
   o.ts = time(nullptr);
   o.status = "COOKING";
   o.printed = false;
 
-  // 最終結果デバッグ
   Serial.printf("buildOrderFromClientJson完了 - 注文番号: %s, 最終アイテム数: %d\n", 
                o.orderNo.c_str(), o.items.size());
   for (int i = 0; i < o.items.size(); i++) {
@@ -223,6 +211,5 @@ Order buildOrderFromClientJson(const JsonDocument& req){
                  i, item.name.c_str(), item.qty, item.unitPriceApplied, item.kind.c_str());
   }
 
-  // TODO: ちんちろ倍率の調整行をここで付与（必要なら）
   return o;
 }

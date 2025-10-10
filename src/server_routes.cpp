@@ -13,7 +13,6 @@
 #include <Preferences.h>
 
 void initHttpRoutes(AsyncWebServer &server) {
-  // /api/ping
   server.on("/api/ping", HTTP_GET, [](AsyncWebServerRequest *request) {
     JsonDocument doc;
     doc["ok"] = true;
@@ -23,11 +22,8 @@ void initHttpRoutes(AsyncWebServer &server) {
     Serial.printf("API /ping 応答: %s\n", res.c_str());
   });
 
-  // /api/state
   server.on("/api/state", HTTP_GET, [](AsyncWebServerRequest *request) {
     JsonDocument doc;
-
-    // settings
     doc["settings"]["catalogVersion"] = S().settings.catalogVersion;
     doc["settings"]["chinchiro"]["enabled"] = S().settings.chinchiro.enabled;
     JsonArray mult = doc["settings"]["chinchiro"]["multipliers"].to<JsonArray>();
@@ -42,17 +38,13 @@ void initHttpRoutes(AsyncWebServer &server) {
     doc["settings"]["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
     doc["settings"]["qrPrint"]["content"] = S().settings.qrPrint.content;
 
-    // session
     doc["session"]["sessionId"] = S().session.sessionId;
     doc["session"]["startedAt"] = S().session.startedAt;
     doc["session"]["exported"]  = S().session.exported;
 
-    // printer
     doc["printer"]["paperOut"]  = S().printer.paperOut;
     doc["printer"]["overheat"]  = S().printer.overheat;
     doc["printer"]["holdJobs"]  = S().printer.holdJobs;
-
-    // menu
     JsonArray menuArray = doc["menu"].to<JsonArray>();
     for (const auto& it : S().menu) {
       JsonObject o = menuArray.add<JsonObject>();
@@ -68,7 +60,6 @@ void initHttpRoutes(AsyncWebServer &server) {
       o["price_as_side"]  = it.price_as_side;
     }
 
-    // orders
     JsonArray ordersArray = doc["orders"].to<JsonArray>();
     for (const auto& od : S().orders) {
       JsonObject o = ordersArray.add<JsonObject>();
@@ -104,7 +95,6 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", res);
   });
 
-  // /api/products/main
   server.on("/api/products/main", HTTP_POST, [](AsyncWebServerRequest *request) {},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -145,12 +135,24 @@ void initHttpRoutes(AsyncWebServer &server) {
           }
         }
       }
-      walAppend("MAIN_UPSERT," + String(millis()));
+      // WAL記録（JSON形式）
+      for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
+        JsonDocument walDoc;
+        walDoc["ts"] = (uint32_t)time(nullptr);
+        walDoc["action"] = "MAIN_UPSERT";
+        walDoc["sku"] = v["id"] | "";
+        walDoc["name"] = v["name"] | "";
+        walDoc["nameRomaji"] = v["nameRomaji"] | "";
+        walDoc["price_normal"] = v["price_normal"] | 0;
+        walDoc["presale_discount_amount"] = v["presale_discount_amount"] | 0;
+        walDoc["active"] = v["active"] | true;
+        String walLine; serializeJson(walDoc, walLine);
+        walAppend(walLine);
+      }
       snapshotSave();
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // /api/products/side
   server.on("/api/products/side", HTTP_POST, [](AsyncWebServerRequest *request) {},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -191,12 +193,24 @@ void initHttpRoutes(AsyncWebServer &server) {
           }
         }
       }
-      walAppend("SIDE_UPSERT," + String(millis()));
+      // WAL記録（JSON形式）
+      for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
+        JsonDocument walDoc;
+        walDoc["ts"] = (uint32_t)time(nullptr);
+        walDoc["action"] = "SIDE_UPSERT";
+        walDoc["sku"] = v["id"] | "";
+        walDoc["name"] = v["name"] | "";
+        walDoc["nameRomaji"] = v["nameRomaji"] | "";
+        walDoc["price_single"] = v["price_single"] | 0;
+        walDoc["price_as_side"] = v["price_as_side"] | 0;
+        walDoc["active"] = v["active"] | true;
+        String walLine; serializeJson(walDoc, walLine);
+        walAppend(walLine);
+      }
       snapshotSave();
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // /api/settings/chinchiro
   server.on("/api/settings/chinchiro", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -216,7 +230,15 @@ void initHttpRoutes(AsyncWebServer &server) {
         }
       }
 
-      walAppend("SETTINGS_UPDATE," + String(millis()));
+      // WAL記録（JSON形式）
+      JsonDocument walDoc;
+      walDoc["ts"] = (uint32_t)time(nullptr);
+      walDoc["action"] = "SETTINGS_UPDATE";
+      walDoc["chinchiro"]["enabled"] = S().settings.chinchiro.enabled;
+      walDoc["chinchiro"]["rounding"] = S().settings.chinchiro.rounding;
+      String walLine; serializeJson(walDoc, walLine);
+      walAppend(walLine);
+      
       snapshotSave();
 
       JsonDocument sync; sync["type"] = "sync.snapshot";
@@ -225,7 +247,6 @@ void initHttpRoutes(AsyncWebServer &server) {
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // /api/settings/qrprint
   server.on("/api/settings/qrprint", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -241,7 +262,15 @@ void initHttpRoutes(AsyncWebServer &server) {
       Serial.printf("QR Print設定更新: enabled=%d, content=%s\n", 
                     S().settings.qrPrint.enabled, S().settings.qrPrint.content.c_str());
 
-      walAppend("SETTINGS_UPDATE," + String(millis()));
+      // WAL記録（JSON形式）
+      JsonDocument walDoc;
+      walDoc["ts"] = (uint32_t)time(nullptr);
+      walDoc["action"] = "SETTINGS_UPDATE";
+      walDoc["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
+      walDoc["qrPrint"]["content"] = S().settings.qrPrint.content;
+      String walLine; serializeJson(walDoc, walLine);
+      walAppend(walLine);
+      
       snapshotSave();
 
       JsonDocument sync; sync["type"] = "sync.snapshot";
@@ -250,7 +279,6 @@ void initHttpRoutes(AsyncWebServer &server) {
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // /api/orders
   server.on("/api/orders", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -267,7 +295,6 @@ void initHttpRoutes(AsyncWebServer &server) {
         return;
       }
 
-      // 受信ログ
       Serial.println("=== 注文受信デバッグ ===");
       String in; serializeJson(doc, in); Serial.printf("受信JSON: %s\n", in.c_str());
 
@@ -297,7 +324,6 @@ void initHttpRoutes(AsyncWebServer &server) {
         Serial.println("警告: lines配列が存在しないか無効です");
       }
 
-      // メニューチェック
       if (S().menu.empty()) {
         Serial.println("緊急事態: メニューが空！初期メニュー投入");
         forceCreateInitialMenu();
@@ -334,9 +360,39 @@ void initHttpRoutes(AsyncWebServer &server) {
           i+1, it.name.c_str(), it.qty, it.unitPriceApplied, it.kind.c_str());
       }
 
-      // stateに反映 → WAL → 印刷キュー → WS通知
       S().orders.push_back(order);
-      walAppend("ORDER_CREATE," + order.orderNo);
+      
+      // WAL記録（JSON形式） - 完全な注文データを記録
+      JsonDocument walDoc;
+      walDoc["ts"] = (uint32_t)time(nullptr);
+      walDoc["action"] = "ORDER_CREATE";
+      walDoc["orderNo"] = order.orderNo;
+      walDoc["status"] = order.status;
+      walDoc["printed"] = order.printed;
+      walDoc["cooked"] = order.cooked;
+      walDoc["pickup_called"] = order.pickup_called;
+      walDoc["picked_up"] = order.picked_up;
+      
+      // 注文明細を記録
+      JsonArray itemsArray = walDoc["items"].to<JsonArray>();
+      for (const auto& item : order.items) {
+        JsonObject itemObj = itemsArray.add<JsonObject>();
+        itemObj["sku"] = item.sku;
+        itemObj["name"] = item.name;
+        itemObj["qty"] = item.qty;
+        itemObj["unitPriceApplied"] = item.unitPriceApplied;
+        itemObj["priceMode"] = item.priceMode;
+        itemObj["kind"] = item.kind;
+        itemObj["unitPrice"] = item.unitPrice;
+        if (!item.discountName.isEmpty()) {
+          itemObj["discountName"] = item.discountName;
+          itemObj["discountValue"] = item.discountValue;
+        }
+      }
+      
+      String walLine; serializeJson(walDoc, walLine);
+      walAppend(walLine);
+      
       enqueuePrint(order);
 
       JsonDocument notify;
@@ -349,7 +405,6 @@ void initHttpRoutes(AsyncWebServer &server) {
       request->send(200, "application/json", res);
     });
 
-  // /api/orders/update
   server.on("/api/orders/update", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -373,7 +428,24 @@ void initHttpRoutes(AsyncWebServer &server) {
       }
       if (!found) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
 
-      walAppend("ORDER_UPDATE," + orderNo + "," + newStatus);
+      // WAL記録（JSON形式）
+      for (const auto& o : S().orders) {
+        if (o.orderNo == orderNo) {
+          JsonDocument walDoc;
+          walDoc["ts"] = (uint32_t)time(nullptr);
+          walDoc["action"] = "ORDER_UPDATE";
+          walDoc["orderNo"] = orderNo;
+          walDoc["status"] = newStatus;
+          walDoc["cooked"] = o.cooked;
+          walDoc["pickup_called"] = o.pickup_called;
+          walDoc["picked_up"] = o.picked_up;
+          walDoc["printed"] = o.printed;
+          String walLine; serializeJson(walDoc, walLine);
+          walAppend(walLine);
+          break;
+        }
+      }
+      
       snapshotSave();
 
       JsonDocument notify; notify["type"]="order.updated"; notify["orderNo"]=orderNo; notify["status"]=newStatus;
@@ -382,7 +454,6 @@ void initHttpRoutes(AsyncWebServer &server) {
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // /api/orders/detail
   server.on("/api/orders/detail", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!request->hasParam("orderNo")) {
       request->send(400, "application/json", "{\"error\":\"Missing orderNo parameter\"}");
@@ -423,25 +494,25 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", out);
   });
 
-  // /api/orders/cancel
   server.on("/api/orders/cancel", HTTP_POST, [](AsyncWebServerRequest *request) {
     Serial.println("[API] POST /api/orders/cancel");
+    Serial.printf("  Content-Type: %s\n", request->contentType().c_str());
     
     if (!request->hasParam("orderNo", true)) {
-      Serial.println("エラー: orderNoパラメータがありません");
-      request->send(400, "application/json", "{\"error\":\"Missing orderNo\"}");
+      Serial.println("[API] エラー: orderNoパラメータがありません");
+      request->send(400, "application/json", "{\"error\":\"Missing orderNo parameter\"}");
       return;
     }
     String orderNo = request->getParam("orderNo", true)->value();
     String reason = request->hasParam("reason", true) ? request->getParam("reason", true)->value() : "";
     
-    Serial.printf("キャンセル対象: 注文番号=%s, 理由=%s\n", orderNo.c_str(), reason.c_str());
-    Serial.printf("現在の注文数: %d件\n", S().orders.size());
+    Serial.printf("[API] キャンセル対象: 注文番号=%s, 理由=%s\n", orderNo.c_str(), reason.c_str());
+    Serial.printf("[API] 現在の注文数: %d件\n", S().orders.size());
 
     bool found=false;
     for (auto& o : S().orders) {
       if (o.orderNo == orderNo) { 
-        Serial.printf("注文発見: %s (status=%s → CANCELLED)\n", o.orderNo.c_str(), o.status.c_str());
+        Serial.printf("[API] ✅ 注文発見: %s (status=%s → CANCELLED)\n", o.orderNo.c_str(), o.status.c_str());
         o.status="CANCELLED"; 
         o.cancelReason=reason; 
         found=true; 
@@ -450,72 +521,82 @@ void initHttpRoutes(AsyncWebServer &server) {
     }
     
     if (!found) { 
-      Serial.printf("エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
+      Serial.printf("[API] ❌ エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
       request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
       return; 
     }
 
-    walAppend("ORDER_CANCEL," + orderNo + "," + reason);
+    // WAL記録（JSON形式）
+    JsonDocument walDoc;
+    walDoc["ts"] = (uint32_t)time(nullptr);
+    walDoc["action"] = "ORDER_CANCEL";
+    walDoc["orderNo"] = orderNo;
+    walDoc["cancelReason"] = reason;
+    String walLine; serializeJson(walDoc, walLine);
+    walAppend(walLine);
+    
     snapshotSave();
 
     JsonDocument notify; notify["type"]="order.updated"; notify["orderNo"]=orderNo; notify["status"]="CANCELLED";
     String msg; serializeJson(notify, msg); wsBroadcast(msg);
 
-    Serial.printf("キャンセル完了: 注文番号 %s\n", orderNo.c_str());
+    Serial.printf("[API] ✅ キャンセル完了: 注文番号 %s\n", orderNo.c_str());
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
-  // /api/orders/reprint
   server.on("/api/orders/reprint", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
       Serial.printf("[API] POST /api/orders/reprint - データ長: %d\n", len);
+      Serial.printf("  Content-Type: %s\n", request->contentType().c_str());
       
       JsonDocument doc;
       if (deserializeJson(doc, (char*)data, len)) {
-        Serial.println("エラー: JSONパースに失敗");
-        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        Serial.println("[API] ❌ エラー: JSONパースに失敗");
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON format\"}");
         return;
       }
       String orderNo = doc["orderNo"] | "";
-      Serial.printf("受信した注文番号: '%s'\n", orderNo.c_str());
+      Serial.printf("[API] 受信した注文番号: '%s'\n", orderNo.c_str());
       
       if (orderNo.isEmpty()) { 
-        Serial.println("エラー: 注文番号が空");
-        request->send(400, "application/json", "{\"error\":\"Missing orderNo\"}"); 
+        Serial.println("[API] ❌ エラー: 注文番号が空");
+        request->send(400, "application/json", "{\"error\":\"Missing orderNo in JSON body\"}"); 
         return; 
       }
 
-      Serial.printf("現在の注文数: %d件\n", S().orders.size());
-      for (const auto& o : S().orders) {
-        Serial.printf("  注文: %s (status=%s, items=%d件)\n", 
-                     o.orderNo.c_str(), o.status.c_str(), o.items.size());
-      }
+      Serial.printf("[API] 現在の注文数: %d件\n", S().orders.size());
 
       Order* found=nullptr;
-      for (auto& o : S().orders) if (o.orderNo == orderNo) { found=&o; break; }
+      for (auto& o : S().orders) {
+        if (o.orderNo == orderNo) { 
+          found=&o; 
+          break; 
+        }
+      }
       
       if (!found) { 
-        Serial.printf("エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
+        Serial.printf("[API] ❌ エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
         request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
         return; 
       }
       
-      Serial.printf("注文発見: %s (items=%d件)\n", found->orderNo.c_str(), found->items.size());
+      Serial.printf("[API] ✅ 注文発見: %s (status=%s, items=%d件)\n", 
+                    found->orderNo.c_str(), found->status.c_str(), found->items.size());
       
       if (found->status == "CANCELLED") {
-        Serial.println("エラー: キャンセル済み注文は再印刷不可");
+        Serial.println("[API] ❌ エラー: キャンセル済み注文は再印刷不可");
         request->send(400, "application/json", "{\"error\":\"Cannot reprint cancelled order\"}");
         return;
       }
 
       if (found->items.empty()) {
-        Serial.println("警告: 注文に明細がありません");
+        Serial.println("[API] ⚠️ 警告: 注文に明細がありません");
         request->send(400, "application/json", "{\"error\":\"Order has no items\"}");
         return;
       }
 
-      Serial.printf("レシート再印刷キュー追加: 注文番号 %s (%d件)\n", orderNo.c_str(), found->items.size());
+      Serial.printf("[API] 🖨️ レシート再印刷キュー追加: 注文番号 %s (%d件)\n", orderNo.c_str(), found->items.size());
       enqueuePrint(*found);
 
       JsonDocument res; res["ok"]=true; res["orderNo"]=orderNo; res["message"]="Reprint job queued successfully";
@@ -523,7 +604,6 @@ void initHttpRoutes(AsyncWebServer &server) {
       request->send(200, "application/json", out);
     });
 
-  // /api/printer/status
   server.on("/api/printer/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     JsonDocument doc;
     doc["paperOut"]   = S().printer.paperOut;
@@ -534,7 +614,6 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", res);
   });
 
-  // /api/printer/paper-replaced
   server.on("/api/printer/paper-replaced", HTTP_POST, [](AsyncWebServerRequest *request) {
     onPaperReplaced();
 
@@ -547,25 +626,46 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
-  // /api/export/csv
   server.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     sendCsvStream(request);
   });
 
-  // /api/recover/restoreLatest
-  server.on("/api/recover/restoreLatest", HTTP_POST, [](AsyncWebServerRequest *request) {
-    String lastTs; bool ok = recoverToLatest(lastTs);
+  server.on("/api/recover", HTTP_POST, [](AsyncWebServerRequest *request) {
+    Serial.println("[API] POST /api/recover");
+    
+    String lastTs;
+    bool ok = recoverToLatest(lastTs);
+    
     if (ok) {
-      JsonDocument sync; sync["type"]="sync.snapshot"; String msg; serializeJson(sync, msg); wsBroadcast(msg);
-      JsonDocument res; res["ok"]=true; res["lastTs"]=lastTs; String out; serializeJson(res, out);
+      Serial.printf("[API] 復旧成功: lastTs=%s\n", lastTs.c_str());
+      
+      // WebSocket通知を送信してフロントエンドを同期
+      JsonDocument sync;
+      sync["type"] = "sync.snapshot";
+      String msg;
+      serializeJson(sync, msg);
+      wsBroadcast(msg);
+      
+      Serial.println("WebSocket ブロードキャスト: {\"type\":\"sync.snapshot\"}");
+      
+      // レスポンス
+      JsonDocument res;
+      res["ok"] = true;
+      res["lastTs"] = lastTs;
+      String out;
+      serializeJson(res, out);
       request->send(200, "application/json", out);
     } else {
-      JsonDocument res; res["ok"]=false; res["error"]=lastTs; String out; serializeJson(res, out);
+      Serial.printf("[API] 復旧失敗: error=%s\n", lastTs.c_str());
+      JsonDocument res;
+      res["ok"] = false;
+      res["error"] = lastTs;
+      String out;
+      serializeJson(res, out);
       request->send(500, "application/json", out);
     }
   });
 
-  // PATCH /api/orders/:orderNo
   server.on("^/api/orders/([0-9]{4})$", HTTP_PATCH, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -587,8 +687,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         if (o.orderNo == orderNo) {
           o.status = newStatus;
           found = true;
-          
-          // 互換性レイヤー: ステータスに応じて pickup_called も連動
+
           if (newStatus == "DONE" || newStatus == "COOKED") {
             o.cooked = true;
             o.pickup_called = true;
@@ -607,10 +706,26 @@ void initHttpRoutes(AsyncWebServer &server) {
       
       if (!found) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
 
-      walAppend("ORDER_UPDATE," + orderNo + "," + newStatus);
+      // WAL記録（JSON形式）
+      for (const auto& o : S().orders) {
+        if (o.orderNo == orderNo) {
+          JsonDocument walDoc;
+          walDoc["ts"] = (uint32_t)time(nullptr);
+          walDoc["action"] = "ORDER_UPDATE";
+          walDoc["orderNo"] = orderNo;
+          walDoc["status"] = newStatus;
+          walDoc["cooked"] = o.cooked;
+          walDoc["pickup_called"] = o.pickup_called;
+          walDoc["picked_up"] = o.picked_up;
+          walDoc["printed"] = o.printed;
+          String walLine; serializeJson(walDoc, walLine);
+          walAppend(walLine);
+          break;
+        }
+      }
+      
       snapshotSave();
 
-      // 互換性レイヤー: 適切なイベントタイプで通知
       JsonDocument notify; 
       notify["type"] = notifyType;
       notify["orderNo"] = orderNo; 
@@ -621,15 +736,13 @@ void initHttpRoutes(AsyncWebServer &server) {
       Serial.printf("  ✅ WebSocket通知送信: type=%s\n", notifyType.c_str());
 
       JsonDocument res; res["ok"]=true; String out; serializeJson(res, out);
-      request->send(200, "application/json", out);
+      request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // POST /api/orders/:id/cooked - 調理済み→呼び出し画面へ
   server.on("^\\/api\\/orders\\/([0-9]+)\\/cooked$", HTTP_POST, [](AsyncWebServerRequest *request) {
     String path = request->url();
     Serial.printf("[API] POST リクエスト受信: %s\n", path.c_str());
     
-    // URLからorderNoを抽出 (/api/orders/0001/cooked → 0001)
     int startIdx = path.indexOf("/orders/") + 8;
     int endIdx = path.indexOf("/cooked");
     String orderNo = path.substring(startIdx, endIdx);
@@ -652,7 +765,14 @@ void initHttpRoutes(AsyncWebServer &server) {
       return; 
     }
     
-    walAppend("ORDER_COOKED," + orderNo);
+    // WAL記録（JSON形式）
+    JsonDocument walDoc;
+    walDoc["ts"] = (uint32_t)time(nullptr);
+    walDoc["action"] = "ORDER_COOKED";
+    walDoc["orderNo"] = orderNo;
+    String walLine; serializeJson(walDoc, walLine);
+    walAppend(walLine);
+    
     snapshotSave();
     
     JsonDocument notify;
@@ -664,12 +784,10 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
-  // POST /api/orders/:id/picked - 品出し済み→呼び出し画面から削除
   server.on("^\\/api\\/orders\\/([0-9]+)\\/picked$", HTTP_POST, [](AsyncWebServerRequest *request) {
     String path = request->url();
     Serial.printf("[API] POST リクエスト受信: %s\n", path.c_str());
     
-    // URLからorderNoを抽出 (/api/orders/0001/picked → 0001)
     int startIdx = path.indexOf("/orders/") + 8;
     int endIdx = path.indexOf("/picked");
     String orderNo = path.substring(startIdx, endIdx);
@@ -692,7 +810,14 @@ void initHttpRoutes(AsyncWebServer &server) {
       return; 
     }
     
-    walAppend("ORDER_PICKED," + orderNo);
+    // WAL記録（JSON形式）
+    JsonDocument walDoc;
+    walDoc["ts"] = (uint32_t)time(nullptr);
+    walDoc["action"] = "ORDER_PICKED";
+    walDoc["orderNo"] = orderNo;
+    String walLine; serializeJson(walDoc, walLine);
+    walAppend(walLine);
+    
     snapshotSave();
     
     JsonDocument notify;
@@ -704,7 +829,6 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
-  // GET /api/call-list - 呼び出し中の注文一覧
   server.on("/api/call-list", HTTP_GET, [](AsyncWebServerRequest *request) {
     JsonDocument doc;
     JsonArray list = doc["callList"].to<JsonArray>();
@@ -721,7 +845,6 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", res);
   });
 
-  // POST /api/time/set
   server.on("/api/time/set", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -741,7 +864,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // POST /api/settings/system
+
   server.on("/api/settings/system", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
@@ -769,7 +892,6 @@ void initHttpRoutes(AsyncWebServer &server) {
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
-  // POST /api/session/end
   server.on("/api/session/end", HTTP_POST, [](AsyncWebServerRequest *request) {
     S().orders.clear();
     S().session.exported = false;
@@ -786,14 +908,19 @@ void initHttpRoutes(AsyncWebServer &server) {
     S().printer.holdJobs = 0;
 
     snapshotSave();
-    walAppend("SESSION_END," + String(time(nullptr)));
+    
+    // WAL記録（JSON形式）
+    JsonDocument walDoc;
+    walDoc["ts"] = (uint32_t)time(nullptr);
+    walDoc["action"] = "SESSION_END";
+    String walLine; serializeJson(walDoc, walLine);
+    walAppend(walLine);
 
     JsonDocument notify; notify["type"]="session.ended"; String msg; serializeJson(notify, msg); wsBroadcast(msg);
 
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
-  // POST /api/system/reset
   server.on("/api/system/reset", HTTP_POST, [](AsyncWebServerRequest *request) {
     Serial.println("=== システム完全初期化開始 ===");
 
@@ -807,15 +934,19 @@ void initHttpRoutes(AsyncWebServer &server) {
     ensureInitialMenu();
     if (snapshotSave()) Serial.println("スナップショット保存完了"); else Serial.println("警告: スナップショット保存失敗");
 
+    // WAL記録（JSON形式）
+    JsonDocument walDoc;
+    walDoc["ts"] = (uint32_t)time(nullptr);
+    walDoc["action"] = "SYSTEM_RESET";
+    String walLine; serializeJson(walDoc, walLine);
+    walAppend(walLine);
+
     JsonDocument notify; notify["type"]="system.reset"; String msg; serializeJson(notify, msg); wsBroadcast(msg);
 
     Serial.println("=== システム完全初期化完了 ===");
     request->send(200, "application/json", "{\"ok\":true,\"message\":\"システムを完全初期化しました\"}");
   });
 
-  // ===== プリンタAPI（新実装に合わせて統一） =====
-
-  // 日本語印刷テスト（POST/GETともにOK）
   server.on("/api/print/test-jp", HTTP_POST, [](AsyncWebServerRequest *request) {
     Serial.println("=== 日本語印刷テスト開始 (POST) ===");
     if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
@@ -832,10 +963,9 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "text/html; charset=UTF-8", html);
   });
 
-  // ボーレート変更 (default=115200 へ統一)
   server.on("/api/print/baud", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println("[API] GET /api/print/baud");
-    String b = request->hasParam("b") ? request->getParam("b")->value() : "115200"; // unified default
+    String b = request->hasParam("b") ? request->getParam("b")->value() : "115200"; 
     int baud = b.toInt();
     if (baud != 115200 && baud != 19200) {
       request->send(400, "application/json", "{\"ok\":false,\"error\":\"サポートされていないボーレートです (115200|19200)\"}");
@@ -847,9 +977,6 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "application/json", msg);
   });
 
-  // TODO: 将来 DLE EOT ステータス要求 (0x10 0x04 n) を実装し /api/printer/status-raw 等で返却
-
-  // ESC * 専用黒バー
   server.on("/api/print/selfcheck-escstar", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println("[API] GET /api/print/selfcheck-escstar");
     if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
@@ -858,7 +985,6 @@ void initHttpRoutes(AsyncWebServer &server) {
   });
 
 
-  // 日本語直接印刷テスト
   server.on("/api/print/test-japanese", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println("[API] GET /api/print/test-japanese");
     if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
@@ -866,7 +992,7 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(ok?200:500, "application/json", ok? "{\"ok\":true}":"{\"ok\":false}");
   });
 
-  // 英語テスト印刷（ASCII直送）
+
   server.on("/api/print/test-english", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println("[API] GET /api/print/test-english");
     if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
@@ -874,7 +1000,6 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(ok?200:500, "application/json", ok? "{\"ok\":true}":"{\"ok\":false}");
   });
 
-  // 英語レシート（サンプル）→ 英語テスト印字に統一
   server.on("/api/print/receipt-english", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println("[API] GET /api/print/receipt-english");
     if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
@@ -882,7 +1007,6 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(ok?200:500, "application/json", ok? "{\"ok\":true}":"{\"ok\":false}");
   });
 
-  // ================= Hello World 超ミニ疎通テスト =================
   server.on("/api/print/hello", HTTP_GET, [](AsyncWebServerRequest *request){
     Serial.println("[API] GET /api/print/hello");
     if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
@@ -904,16 +1028,12 @@ void initHttpRoutes(AsyncWebServer &server) {
       "</body></html>";
     request->send(200, "text/html; charset=UTF-8", html);
   });
-
-  // デバッグ用：すべてのAPIリクエストをログ
   server.onNotFound([](AsyncWebServerRequest *request) {
     String method = (request->method() == HTTP_GET) ? "GET" : 
                    (request->method() == HTTP_POST) ? "POST" : 
                    (request->method() == HTTP_PUT) ? "PUT" : 
                    (request->method() == HTTP_DELETE) ? "DELETE" : "OTHER";
     Serial.printf("[404] %s %s\n", method.c_str(), request->url().c_str());
-    
-    // 注文関連のAPIの場合は詳細ログ
     if (request->url().indexOf("/api/orders/") >= 0) {
       Serial.println("  ⚠️ 注文関連APIがマッチしませんでした");
       Serial.printf("  URL: %s\n", request->url().c_str());

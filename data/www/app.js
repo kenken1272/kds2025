@@ -1,37 +1,29 @@
-// KDS システム - PWA JavaScript (Milestone 2)
-
-// グローバル状態
 const state = {
     page: 'order',
     ws: null,
     online: false,
-    data: null, // API state cache
-    cart: [], // 注文カート
-    settingsTab: 'main', // 設定タブ (main|side|system|chinchiro)
-    callList: [] // 呼び出し中の注文番号リスト [{orderNo, ts}]
+    data: null, 
+    cart: [],
+    settingsTab: 'main', 
+    callList: [] 
 };
 
-// DOM要素
 const app = document.getElementById('app');
 const offlineModal = document.getElementById('offline-modal');
 const reconnectBtn = document.getElementById('reconnect-btn');
 const statusIndicator = document.getElementById('connection-status');
 
-// 初期化
 document.addEventListener('DOMContentLoaded', () => {
     console.log('KDS PWA 初期化中...');
-    
-    // Service Worker 登録
+
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js')
             .then(reg => console.log('Service Worker 登録成功:', reg))
             .catch(err => console.error('Service Worker 登録失敗:', err));
     }
-    
-    // ナビゲーション設定
+
     setupNavigation();
-    
-    // 時刻同期を最優先で実行（データ取得前）
+
     syncTimeOnce().then(() => {
         console.log('初期時刻同期完了 - データ取得開始');
         // 初期データ取得
@@ -41,28 +33,22 @@ document.addEventListener('DOMContentLoaded', () => {
         // 失敗してもデータは取得
         loadStateData();
     });
-    
-    // 定期的な時刻同期（5分毎に変更 - より頻繁に）
+
     setInterval(syncTimeOnce, 5 * 60 * 1000);
-    
-    // WebSocket接続
+
     connectWs();
-    
-    // 再接続ボタン
+
     reconnectBtn.addEventListener('click', connectWs);
-    
-    // グローバルエラーハンドリング設定
+
     window.addEventListener("error", e => console.error("GLOBAL ERR", e.error || e.message));
     window.addEventListener("unhandledrejection", e => console.error("PROMISE REJECTION", e.reason));
-    
-    // イベント委譲で動的DOMに対応
+
     document.addEventListener("click", (ev) => {
         const btn = ev.target.closest("[data-action='confirm-order']");
         if (!btn) return;
         
         ev.preventDefault();
-        
-        // 二重送信ガード
+
         if (btn.dataset.loading === "1") return;
         btn.dataset.loading = "1";
         
@@ -70,28 +56,19 @@ document.addEventListener('DOMContentLoaded', () => {
             delete btn.dataset.loading;
         });
     });
-    
-    // 初期ページ表示
+
     render();
-    
-    // 現在時刻の定期更新（1秒毎）
     updateCurrentTime();
     setInterval(updateCurrentTime, 1000);
-    
-    // 呼び出しリストの定期更新（10秒毎）
     setInterval(() => {
         if (state.page === 'call') {
             loadCallList();
         }
     }, 10000);
-    
-    // 初回呼び出しリスト取得
     loadCallList();
 });
 
-// 現在時刻表示更新
 function updateCurrentTime() {
-    // ヘッダーの時刻表示（注文画面など）
     const timeDiv = document.getElementById('current-time');
     if (timeDiv) {
         const now = new Date();
@@ -105,8 +82,6 @@ function updateCurrentTime() {
             second: '2-digit'
         });
     }
-    
-    // 呼び出し画面の時刻表示（左下小さく）
     const callTimeDiv = document.querySelector('.call-time');
     if (callTimeDiv) {
         const now = new Date();
@@ -118,21 +93,17 @@ function updateCurrentTime() {
         });
     }
 }
-
-// データ取得
 async function loadStateData() {
     try {
         const response = await fetch('/api/state');
         state.data = await response.json();
         console.log('状態データ取得完了:', state.data);
-        render(); // 再描画
+        render(); 
         updateConfirmOrderButton();
     } catch (error) {
         console.error('状態データ取得エラー:', error);
     }
 }
-
-// 時刻同期（起動時に1回）- デバッグ強化
 async function syncTimeOnce() {
     const now = new Date();
     const epoch = Math.floor(now.getTime() / 1000);
@@ -159,23 +130,16 @@ async function syncTimeOnce() {
         console.error('時刻同期エラー:', e);
     }
 }
-
-// ナビゲーション設定
 function setupNavigation() {
     const navBtns = document.querySelectorAll('.nav-btn');
     
     navBtns.forEach(btn => {
         btn.addEventListener('click', (e) => {
             const page = e.target.dataset.page;
-            if (page) {
-                // アクティブ状態更新
+            if (page) {            
                 navBtns.forEach(b => b.classList.remove('active'));
                 e.target.classList.add('active');
-                
-                // ページ切り替え
                 state.page = page;
-                
-                // 呼び出し画面に切り替える場合は最新データを取得
                 if (page === 'call') {
                     loadCallList().then(() => render());
                 } else {
@@ -184,16 +148,10 @@ function setupNavigation() {
             }
         });
     });
-    
-    // 初期アクティブ設定
     document.querySelector(`[data-page="${state.page}"]`).classList.add('active');
 }
-
-// ページ切り替え関数
 function navigateTo(page) {
     state.page = page;
-    
-    // ナビゲーションバーのアクティブ状態更新
     const navBtns = document.querySelectorAll('.nav-btn');
     navBtns.forEach(btn => {
         if (btn.dataset.page === page) {
@@ -202,16 +160,12 @@ function navigateTo(page) {
             btn.classList.remove('active');
         }
     });
-    
-    // 呼び出し画面に切り替える場合は最新データを取得
     if (page === 'call') {
         loadCallList().then(() => render());
     } else {
         render();
     }
 }
-
-// WebSocket接続
 function connectWs() {
     const wsUrl = `ws://${location.host}/ws`;
     console.log('WebSocket接続試行:', wsUrl);
@@ -226,8 +180,6 @@ function connectWs() {
     state.ws.onclose = () => {
         console.log('WebSocket接続切断');
         updateOnlineStatus(false);
-        
-        // 3秒後に自動再接続
         setTimeout(connectWs, 3000);
     };
     
@@ -244,13 +196,10 @@ function connectWs() {
             if (data.type === 'hello') {
                 console.log('サーバーから挨拶:', data.msg);
             } else if (data.type === 'sync.snapshot') {
-                // スナップショット同期
                 loadStateData();
             } else if (data.type === 'order.created' || data.type === 'order.updated') {
-                // 注文更新
                 loadStateData();
             } else if (data.type === 'printer.status') {
-                // プリンタ状態更新
                 if (state.data) {
                     state.data.printer.paperOut = data.paperOut !== undefined ? data.paperOut : state.data.printer.paperOut;
                     state.data.printer.holdJobs = data.holdJobs !== undefined ? data.holdJobs : state.data.printer.holdJobs;
@@ -258,30 +207,26 @@ function connectWs() {
                     updateConfirmOrderButton();
                 }
             } else if (data.type === 'order.cooked') {
-                // 調理済み→呼び出しリストに追加
                 const exists = state.callList.find(item => item.orderNo === data.orderNo);
                 if (!exists) {
                     state.callList.push({ orderNo: data.orderNo, ts: Date.now() / 1000 });
                     console.log('呼び出しリストに追加:', data.orderNo);
                 }
-                // 呼び出し画面のみスムーズに更新
                 if (state.page === 'call') {
                     updateCallScreen();
                 } else {
-                    loadStateData(); // 他の画面は通常更新
+                    loadStateData(); 
                 }
             } else if (data.type === 'order.picked') {
-                // 品出し済み→呼び出しリストから削除
                 const beforeLength = state.callList.length;
                 state.callList = state.callList.filter(item => item.orderNo !== data.orderNo);
                 if (beforeLength !== state.callList.length) {
                     console.log('呼び出しリストから削除:', data.orderNo);
                 }
-                // 呼び出し画面のみスムーズに更新
                 if (state.page === 'call') {
                     updateCallScreen();
                 } else {
-                    loadStateData(); // 他の画面は通常更新
+                    loadStateData(); 
                 }
             }
             
@@ -290,8 +235,6 @@ function connectWs() {
         }
     };
 }
-
-// オンライン状態更新
 function updateOnlineStatus(online) {
     state.online = online;
     
@@ -304,12 +247,10 @@ function updateOnlineStatus(online) {
     }
 }
 
-// 紙切れモーダル表示・非表示
 function updatePaperOutModal() {
     const modal = document.getElementById('paper-out-modal');
     if (state.data && state.data.printer.paperOut) {
         if (!modal) {
-            // モーダル動的作成
             const modalHtml = `
                 <div id="paper-out-modal" class="modal">
                     <div class="modal-content">
@@ -334,8 +275,6 @@ function updatePaperOutModal() {
         modal.remove();
     }
 }
-
-// ページレンダリング
 function render() {
     let content = '';
     
@@ -363,8 +302,6 @@ function render() {
     }
     
     app.innerHTML = content;
-    
-    // 呼び出し画面ではナビゲーションバーを非表示
     const nav = document.querySelector('nav.nav');
     if (nav) {
         if (state.page === 'call') {
@@ -373,15 +310,11 @@ function render() {
             nav.style.display = 'flex';
         }
     }
-    
-    // 紙切れモーダル確認
+
     updatePaperOutModal();
-    
-    // ページ固有のイベントリスナー設定
     setupPageEvents();
 }
 
-// 注文ページ
 function renderOrderPage() {
     if (!state.data) {
         return '<div class="card"><h2>📱 注文受付</h2><p>データ読込中...</p></div>';
@@ -390,8 +323,6 @@ function renderOrderPage() {
     const mainItems = state.data.menu.filter(item => item.category === 'MAIN' && item.active);
     const sideItems = state.data.menu.filter(item => item.category === 'SIDE' && item.active);
     const cookingOrders = state.data.orders.filter(order => order.status === 'COOKING');
-    
-    // 紙切れ時の警告
     const paperWarning = state.data.printer.paperOut ? 
         '<div class="card" style="border-left-color: #dc3545;"><h3>⚠️ 注文受付停止中</h3><p>プリンタ用紙切れのため、注文を受け付けできません。</p></div>' : '';
     
@@ -501,7 +432,6 @@ function renderOrderPage() {
     `;
 }
 
-// キッチンページ
 function renderKitchenPage() {
     if (!state.data) {
         return '<div class="card"><h2>👨‍🍳 キッチン表示</h2><p>データ読込中...</p></div>';
@@ -552,13 +482,10 @@ function renderKitchenPage() {
     `;
 }
 
-// 品出しページ
 function renderPickupPage() {
     if (!state.data) {
         return '<div class="card"><h2>📦 品出し管理</h2><p>データ読込中...</p></div>';
     }
-    
-    // 品出し画面では調理中（COOKING）と調理完了（DONE）の商品を表示、品出し済み（READY）は非表示
     const pickupOrders = state.data.orders
         .filter(order => order.status === 'COOKING' || order.status === 'DONE')
         .sort((a, b) => b.ts - a.ts)
@@ -615,7 +542,6 @@ function renderPickupPage() {
     `;
 }
 
-// 設定ページ
 function renderSettingsPage() {
     if (!state.data) {
         return '<div class="card"><h2>⚙️ システム設定</h2><p>データ読込中...</p></div>';
@@ -782,7 +708,6 @@ function renderSettingsPage() {
             </div>
         `;
     } else if (state.settingsTab === 'sales') {
-        // 売上統計を計算
         const salesStats = calculateSalesStats();
         
         tabContent = `
@@ -961,7 +886,6 @@ function renderSettingsPage() {
     return tabNav + tabContent;
 }
 
-// 呼び出し画面
 function renderCallPage() {
     const hasOrders = state.callList.length > 0;
     const items = hasOrders ? state.callList.map(item => `
@@ -994,13 +918,11 @@ function renderCallPage() {
     `;
 }
 
-// 呼び出し画面のスムーズ更新（ちらつき防止）
 function updateCallScreen() {
     const hasOrders = state.callList.length > 0;
     const callScreen = document.querySelector('.call-screen');
     
     if (!callScreen) {
-        // 呼び出し画面が表示されていない場合は何もしない
         return;
     }
     
@@ -1008,7 +930,6 @@ function updateCallScreen() {
     const callEmpty = document.getElementById('call-empty');
     
     if (hasOrders) {
-        // 注文がある場合
         const items = state.callList.map(item => `
             <div class="call-item" data-order="${item.orderNo}">
                 <div class="call-number">${item.orderNo}</div>
@@ -1017,10 +938,8 @@ function updateCallScreen() {
         `).join('');
         
         if (callGrid) {
-            // グリッドが既にある場合は内容を更新
             callGrid.innerHTML = items;
         } else if (callEmpty) {
-            // 空表示からグリッド表示に切り替え
             callEmpty.outerHTML = `
                 <div class="call-header">
                     <h1 onclick="navigateTo('order')" style="cursor: pointer; user-select: none;">お呼び出し</h1>
@@ -1031,9 +950,7 @@ function updateCallScreen() {
             `;
         }
     } else {
-        // 注文がない場合
         if (callGrid) {
-            // グリッドから空表示に切り替え
             const header = callScreen.querySelector('.call-header');
             if (header) header.remove();
             callGrid.outerHTML = `
@@ -1043,12 +960,10 @@ function updateCallScreen() {
                 </div>
             `;
         } else if (callEmpty) {
-            // 既に空表示の場合は何もしない
         }
     }
 }
 
-// エクスポートページ
 function renderExportPage() {
     return `
         <div class="card">
@@ -1069,29 +984,20 @@ function renderExportPage() {
     `;
 }
 
-// ページ固有イベント設定
 function setupPageEvents() {
-    // カート更新
     updateCartDisplay();
-    
-    // 注文済み一覧が表示されている場合は更新
     const completedWidget = document.getElementById('completed-orders-widget');
     if (completedWidget && completedWidget.style.display !== 'none') {
         loadCompletedOrders();
     }
-    
-    // 呼び出し画面の初期ロード
     if (state.page === 'call') {
         loadCallList();
     }
-    
-    // 品出し画面のボタンイベント委譲
     if (state.page === 'pickup') {
         document.addEventListener('click', handlePickupButtonClick);
     }
 }
 
-// 品出し画面のボタンクリック処理（イベント委譲）
 function handlePickupButtonClick(event) {
     const cookedBtn = event.target.closest('.btn-success');
     const pickedBtn = event.target.closest('.btn-info');
@@ -1101,15 +1007,11 @@ function handlePickupButtonClick(event) {
         
         const orderCard = event.target.closest('.pickup-card');
         if (!orderCard) return;
-        
-        // data-orderNo 属性から注文番号を取得
         const orderNo = orderCard.getAttribute('data-order-no');
         if (!orderNo) {
             console.error('注文番号が見つかりません');
             return;
         }
-        
-        // 新システムは機能していないため、旧システムを使用
         if (cookedBtn) {
             updateOrderStatus(orderNo, 'DONE');
         } else if (pickedBtn) {
@@ -1118,7 +1020,6 @@ function handlePickupButtonClick(event) {
     }
 }
 
-// 呼び出しリストをAPIから取得
 async function loadCallList() {
     try {
         console.log('呼び出しリスト取得開始...');
@@ -1135,7 +1036,6 @@ async function loadCallList() {
     }
 }
 
-// 全画面表示トグル
 function toggleFullscreen() {
     if (!document.fullscreenElement) {
         document.documentElement.requestFullscreen().catch(err => {
@@ -1148,20 +1048,11 @@ function toggleFullscreen() {
     }
 }
 
-// 新システムのmarkCooked関数は削除（機能していないため）
-// 旧システムのupdateOrderStatus()を使用してください
-
-// 新システムのmarkPicked関数も削除（機能していないため）
-
-// 注文成功モーダルを表示
 function showOrderSuccessModal(orderNo) {
-    // 既存のモーダルがあれば削除
     const existingModal = document.getElementById('order-success-modal');
     if (existingModal) {
         existingModal.remove();
     }
-    
-    // モーダルを作成
     const modal = document.createElement('div');
     modal.id = 'order-success-modal';
     modal.className = 'modal-backdrop';
@@ -1183,22 +1074,16 @@ function showOrderSuccessModal(orderNo) {
     `;
     
     document.body.appendChild(modal);
-    
-    // 3秒後に自動で閉じる
     setTimeout(() => {
         closeOrderSuccessModal();
     }, 3000);
 }
-
-// 注文成功モーダルを閉じる
 function closeOrderSuccessModal() {
     const modal = document.getElementById('order-success-modal');
     if (modal) {
         modal.remove();
     }
 }
-
-// メイン商品単品追加
 function addMainSingle(sku, priceMode) {
     try {
         if (state.data.printer.paperOut) {
@@ -1217,7 +1102,6 @@ function addMainSingle(sku, priceMode) {
             qty: 1
         });
         
-        // 視覚的フィードバック
         button.style.backgroundColor = '#28a745';
         const originalText = button.textContent;
         button.textContent = '追加完了!';
@@ -1237,7 +1121,6 @@ function addMainSingle(sku, priceMode) {
     }
 }
 
-// サイド選択モーダル表示
 function showSideSelectModal(mainSku, priceMode) {
     const sideItems = state.data.menu.filter(item => item.category === 'SIDE' && item.active);
     
@@ -1288,7 +1171,6 @@ function showSideSelectModal(mainSku, priceMode) {
     document.body.appendChild(modal);
 }
 
-// サイド選択モーダルを閉じる
 function closeSideSelectModal() {
     const modal = document.getElementById('side-select-modal');
     if (modal) {
@@ -1296,7 +1178,6 @@ function closeSideSelectModal() {
     }
 }
 
-// セットをカートに追加
 function addSetToCart(mainSku, priceMode, sideSku) {
     try {
         if (state.data.printer.paperOut) {
@@ -1308,14 +1189,12 @@ function addSetToCart(mainSku, priceMode, sideSku) {
             type: 'SET',
             mainSku: mainSku,
             priceMode: priceMode,
-            sideSkus: [sideSku], // 1つのサイドのみ
+            sideSkus: [sideSku], 
             qty: 1
         });
         
         updateCartDisplay();
         closeSideSelectModal();
-        
-        // 成功フィードバック
         const mainItem = state.data.menu.find(item => item.sku === mainSku);
         const sideItem = state.data.menu.find(item => item.sku === sideSku);
         if (mainItem && sideItem) {
@@ -1328,22 +1207,17 @@ function addSetToCart(mainSku, priceMode, sideSku) {
     }
 }
 
-// カート操作（エラーハンドリング強化）
 function addToCart(type, sku, priceMode = '') {
     try {
-        // プリンター紙切れチェック
         if (state.data.printer.paperOut) {
             alert('プリンターの用紙を確認してください');
             return;
         }
-        
-        // ボタン連続クリック防止
         const button = event.target;
         if (button.disabled) return;
         button.disabled = true;
         
         if (type === 'SET') {
-            // SETの場合、サイド選択ダイアログを表示（簡易実装：最初のサイド2つを自動選択）
             console.log('メニューデータ確認:', state.data.menu);
             const sideItems = state.data.menu.filter(item => item.category === 'SIDE' && item.active);
             console.log('フィルタ後のサイドアイテム:', sideItems);
@@ -1365,8 +1239,6 @@ function addToCart(type, sku, priceMode = '') {
                 sideSkus: selectedSides,
                 qty: 1
             });
-            
-            // 視覚的フィードバック
             button.style.backgroundColor = '#28a745';
             button.textContent = '追加完了!';
             
@@ -1376,15 +1248,11 @@ function addToCart(type, sku, priceMode = '') {
                 sideSku: sku,
                 qty: 1
             });
-            
-            // 視覚的フィードバック
             button.style.backgroundColor = '#28a745';
             button.textContent = '追加完了!';
         }
         
         updateCartDisplay();
-        
-        // ボタン復元（1秒後）
         setTimeout(() => {
             button.disabled = false;
             button.style.backgroundColor = '';
@@ -1395,7 +1263,6 @@ function addToCart(type, sku, priceMode = '') {
     } catch (error) {
         console.error('カート追加エラー:', error);
         alert('注文の追加に失敗しました。再試行してください。');
-        // ボタン復元
         const button = event.target;
         button.disabled = false;
     }
@@ -1409,8 +1276,6 @@ function clearCart() {
 function updateCartDisplay() {
     const cartDiv = document.getElementById('cart-items');
     if (!cartDiv || !state.data) return;
-    
-    // デバッグ: カート内容を出力
     console.log('=== カート表示デバッグ ===');
     console.log('カート内容:', state.cart);
     console.log('メニューデータ数:', state.data.menu ? state.data.menu.length : 0);
@@ -1431,7 +1296,6 @@ function updateCartDisplay() {
         let isSet = false;
         
         if (cartItem.type === 'MAIN_SINGLE') {
-            // メイン商品単品
             const mainItem = state.data.menu.find(item => item.sku === cartItem.mainSku);
             if (mainItem) {
                 const mainPrice = cartItem.priceMode === 'presale' ? 
@@ -1467,16 +1331,12 @@ function updateCartDisplay() {
                 description = `${sideItem.name} (単品)`;
             }
         }
-        
-        // ちんちろ適用（SET商品のみ）
         let chinchoiroMultiplier = cartItem.chinchoiroMultiplier || 1.0;
         let chinchoiroResult = cartItem.chinchoiroResult || 'なし';
         
         if (isSet && chinchoiroEnabled) {
             const adjustment = calculateChinchoiroAdjustmentClient(basePrice, chinchoiroMultiplier);
             itemTotal = basePrice + adjustment;
-            
-            // ちんちろ選択UI
             const chinchoiroOptions = multipliers.map(m => {
                 const label = getChinchoiroLabel(m);
                 const selected = Math.abs(m - chinchoiroMultiplier) < 0.01 ? 'selected' : '';
@@ -1527,7 +1387,6 @@ function updateCartDisplay() {
     updateConfirmOrderButton();
 }
 
-// ちんちろラベル取得
 function getChinchoiroLabel(multiplier) {
     if (multiplier === 0) return 'ピンゾロ（無料）';
     if (multiplier === 0.5) return '半額';
@@ -1537,7 +1396,6 @@ function getChinchoiroLabel(multiplier) {
     return `${multiplier}倍`;
 }
 
-// クライアント側のちんちろ調整額計算
 function calculateChinchoiroAdjustmentClient(basePrice, multiplier) {
     const rounding = state.data.settings.chinchiro.rounding || 'round';
     const rawAdjustment = basePrice * (multiplier - 1.0);
@@ -1551,7 +1409,6 @@ function calculateChinchoiroAdjustmentClient(basePrice, multiplier) {
     }
 }
 
-// ちんちろ適用
 function applyChinchoiro(cartIndex, multiplier) {
     if (cartIndex < 0 || cartIndex >= state.cart.length) return;
     
@@ -1567,7 +1424,6 @@ function removeFromCart(index) {
     updateCartDisplay();
 }
 
-// 注文確定ボタンの活性/非活性を更新
 function updateConfirmOrderButton() {
     const btn = document.querySelector('#confirm-order-btn, [data-action="confirm-order"]');
     if (!btn) return;
@@ -1575,20 +1431,17 @@ function updateConfirmOrderButton() {
     btn.disabled = shouldDisable;
 }
 
-// NaN耐性のある数値変換関数
 function safeNum(v) { 
     const n = Number(v); 
     return Number.isFinite(n) ? n : 0; 
 }
 
-// 注文確定ボタンのハンドラー（確実に動作させる）
 async function handleConfirmOrder(event) {
     event.preventDefault();
     event.stopPropagation();
     
     const button = event.target;
-    
-    // 二重送信ガード
+
     if (button.dataset.loading === "1" || button.disabled) {
         console.log('注文送信中またはボタン無効 - スキップ');
         return;
@@ -1615,8 +1468,7 @@ async function submitOrder() {
         alert('カートが空です');
         return;
     }
-    
-    // ボタン状態更新（data-action対応）
+
     const submitBtn = document.querySelector('[data-action="confirm-order"]');
     console.log('ボタン状態:', submitBtn ? `disabled=${submitBtn.disabled}` : 'ボタンが見つからない');
     if (submitBtn) {
@@ -1624,8 +1476,7 @@ async function submitOrder() {
         submitBtn.textContent = '⏳ 注文処理中...';
         console.log('ボタンをdisabledに設定');
     }
-    
-    // NaN耐性バリデーション - カートデータを安全化
+
     const safeCart = state.cart.map(item => {
         const safeItem = { ...item };
         if ('qty' in safeItem) safeItem.qty = Math.max(1, safeNum(safeItem.qty));
@@ -1636,8 +1487,7 @@ async function submitOrder() {
     });
     
     console.log('NaN耐性処理後のカート:', safeCart);
-    
-    // リトライ機能付きで注文送信
+
     const maxRetries = 3;
     let retryCount = 0;
     
@@ -1647,33 +1497,29 @@ async function submitOrder() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ lines: safeCart }),
-                timeout: 10000 // 10秒タイムアウト
+                timeout: 10000 
             });
             
         if (response.ok) {
             const result = await response.json();
-            
-            // デバッグ: 注文送信内容と結果を出力
+
             console.log('=== 注文送信デバッグ ===');
             console.log('送信データ:', { lines: state.cart });
             console.log('サーバー応答:', result);
-            
-            // 成功時の処理
+
             clearCart();
-            await loadStateData(); // 状態更新
+            await loadStateData(); 
             updateConfirmOrderButton();
-            
-            // 成功通知モーダルを表示
+
             showOrderSuccessModal(result.orderNo);
-            
-            // ボタン復元
+
             if (submitBtn) {
                 submitBtn.disabled = false;
                 submitBtn.style.backgroundColor = '';
                 submitBtn.textContent = '📝 注文確定';
             }
             
-            return; // 成功したのでリトライループを抜ける
+            return;
             
         } else {
                 const errorData = await response.text();
@@ -1692,20 +1538,14 @@ async function submitOrder() {
             console.error(`注文送信失敗 (試行${retryCount}/${maxRetries}):`, error);
             
             if (retryCount < maxRetries) {
-                // リトライ前に1秒待機
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 submitBtn.textContent = `再試行中... (${retryCount + 1}/${maxRetries})`;
             } else {
-                // 最大リトライ数に達した場合
                 alert(`注文の送信に失敗しました: ${error.message}\n\nカートの内容は保持されています。再度お試しください。`);
-                
-                // ボタン復元
                 if (submitBtn) {
                     submitBtn.disabled = false;
                     submitBtn.style.backgroundColor = '#dc3545';
                     submitBtn.textContent = '📝 注文確定（再試行）';
-                    
-                    // 5秒後に通常状態に戻す
                     setTimeout(() => {
                         submitBtn.style.backgroundColor = '';
                         submitBtn.textContent = '📝 注文確定';
@@ -1716,51 +1556,71 @@ async function submitOrder() {
     }
 }
 
-// 注文操作
 async function cancelOrder(orderNo) {
-    console.log('キャンセルリクエスト: 注文番号=', orderNo, 'タイプ=', typeof orderNo);
+    console.log('[cancelOrder] 開始: 注文番号=', orderNo, 'タイプ=', typeof orderNo);
     
-    // 注文データの存在確認
+    // 注文の存在確認
     if (state.data && state.data.orders) {
         const order = state.data.orders.find(o => o.orderNo === orderNo);
-        console.log('注文データ検索結果:', order);
+        console.log('[cancelOrder] 注文データ検索結果:', order);
         if (order) {
-            console.log('注文詳細:', {
+            console.log('[cancelOrder] 注文詳細:', {
                 orderNo: order.orderNo,
                 status: order.status,
                 itemCount: order.items ? order.items.length : 0
             });
         } else {
-            console.error('注文が見つかりません:', orderNo);
+            console.error('[cancelOrder] 注文が見つかりません:', orderNo);
+            alert(`❌ 注文 #${orderNo} が見つかりません`);
+            return;
         }
     }
     
-    const reason = prompt('キャンセル理由:') || '';
+    // キャンセル理由を入力
+    const reason = prompt('キャンセル理由を入力してください（任意）:') || '';
     
     try {
-        const requestBody = `orderNo=${orderNo}&reason=${encodeURIComponent(reason)}`;
-        console.log('送信データ:', requestBody);
+        // URLSearchParamsを使用（正しいエンコーディング）
+        const params = new URLSearchParams();
+        params.set('orderNo', orderNo);
+        if (reason) {
+            params.set('reason', reason);
+        }
+        
+        console.log('[cancelOrder] 送信データ:', params.toString());
         
         const response = await fetch('/api/orders/cancel', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: requestBody
+            headers: { 
+                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
+            },
+            body: params.toString()
         });
         
-        console.log('レスポンス:', response.status, response.statusText);
+        console.log('[cancelOrder] レスポンス:', response.status, response.statusText);
         
         if (response.ok) {
-            console.log('キャンセル成功');
-            alert(`注文 # ${orderNo} をキャンセルしました`);
-            loadStateData();
+            const data = await response.json();
+            console.log('[cancelOrder] キャンセル成功:', data);
+            alert(`✅ 注文 #${orderNo} をキャンセルしました`);
+            // 画面を更新
+            await loadStateData();
         } else {
-            const errorText = await response.text();
-            console.error('キャンセル失敗:', errorText);
-            alert(`キャンセルに失敗しました: ${errorText}`);
+            // エラーレスポンスの処理
+            let errorMessage = `HTTP ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch {
+                const errorText = await response.text();
+                errorMessage = errorText || errorMessage;
+            }
+            console.error('[cancelOrder] キャンセル失敗:', errorMessage);
+            alert(`❌ キャンセルに失敗しました: ${errorMessage}`);
         }
     } catch (error) {
-        console.error('キャンセルエラー:', error);
-        alert(`通信エラー: ${error.message}`);
+        console.error('[cancelOrder] 通信エラー:', error);
+        alert(`❌ 通信エラー: ${error.message}\n\nネットワーク接続を確認してください。`);
     }
 }
 
@@ -1783,7 +1643,6 @@ async function completeOrder(orderNo) {
     }
 }
 
-// 設定操作
 function switchSettingsTab(tab) {
     state.settingsTab = tab;
     render();
@@ -1792,8 +1651,6 @@ function switchSettingsTab(tab) {
 async function saveMainProducts() {
     const items = [];
     const mainItems = state.data.menu.filter(item => item.category === 'MAIN');
-    
-    // 既存アイテム
     mainItems.forEach((item, idx) => {
         items.push({
             id: document.getElementById(`main-id-${idx}`).value,
@@ -1804,8 +1661,6 @@ async function saveMainProducts() {
             active: document.getElementById(`main-active-${idx}`).checked
         });
     });
-    
-    // 新規アイテム
     const newName = document.getElementById('main-name-new').value;
     if (newName) {
         items.push({
@@ -1835,7 +1690,6 @@ async function saveMainProducts() {
     }
 }
 
-// システム設定保存
 async function saveSystemSettings() {
     const settings = {
         presaleEnabled: document.getElementById('presale-enabled').checked,
@@ -1859,7 +1713,7 @@ async function saveSystemSettings() {
         
         if (response.ok) {
             alert('システム設定を保存しました');
-            loadStateData(); // 設定を再読み込み
+            loadStateData(); 
         } else {
             alert('保存に失敗しました');
         }
@@ -1871,8 +1725,6 @@ async function saveSystemSettings() {
 async function saveSideProducts() {
     const items = [];
     const sideItems = state.data.menu.filter(item => item.category === 'SIDE');
-    
-    // 既存アイテム
     sideItems.forEach((item, idx) => {
         items.push({
             id: document.getElementById(`side-id-${idx}`).value,
@@ -1883,8 +1735,6 @@ async function saveSideProducts() {
             active: document.getElementById(`side-active-${idx}`).checked
         });
     });
-    
-    // 新規アイテム
     const newName = document.getElementById('side-name-new').value;
     if (newName) {
         items.push({
@@ -1960,7 +1810,6 @@ async function saveQrPrintSettings() {
     }
 }
 
-// 新設定UI用の関数群
 function updateMainItem(sku, field, value) {
     if (!state.data) return;
     const item = state.data.menu.find(m => m.sku === sku && m.category === 'MAIN');
@@ -2065,17 +1914,15 @@ async function saveNewMenuItem(item) {
     }
 }
 
-// Debounce用のタイマー
 let saveMenuTimer = null;
 
 function debouncedSaveMenu() {
     if (saveMenuTimer) clearTimeout(saveMenuTimer);
     saveMenuTimer = setTimeout(() => {
         saveMenuImmediate();
-    }, 1000); // 1秒後に保存
+    }, 1000); 
 }
 
-// 個別商品を即座に保存（既存のPOSTエンドポイント使用、1アイテムのみ送信）
 async function saveMenuItemImmediate(item) {
     if (!item || !item.sku) {
         console.error('SKUが見つかりません:', item);
@@ -2084,12 +1931,9 @@ async function saveMenuItemImmediate(item) {
     
     try {
         const endpoint = item.category === 'MAIN' ? '/api/products/main' : '/api/products/side';
-        
-        // 既存のPOSTエンドポイントを使用（upsert動作）
-        // 重要: 必ずSKU（id）を含める、1アイテムのみの配列で送信
         const payload = {
             items: [{
-                id: item.sku,  // SKUを明示的にidとして送信
+                id: item.sku, 
                 name: item.name,
                 nameRomaji: item.nameRomaji || item.name,
                 active: item.active,
@@ -2119,7 +1963,6 @@ async function saveMenuItemImmediate(item) {
     }
 }
 
-// デバウンス処理用のタイマー
 let saveMenuItemTimer = null;
 function debouncedSaveMenuItem(item) {
     if (saveMenuItemTimer) {
@@ -2127,24 +1970,20 @@ function debouncedSaveMenuItem(item) {
     }
     saveMenuItemTimer = setTimeout(() => {
         saveMenuItemImmediate(item);
-    }, 1000); // 1秒後に保存
+    }, 1000); 
 }
 
-// 旧関数（互換性のため残す、ただし警告を表示）
+
 async function saveMenuImmediate() {
     console.warn('⚠️ saveMenuImmediate()は非推奨です。個別更新を使用してください。');
 }
 
-// エクスポート操作
 async function downloadCsv() {
     try {
-        // CSVエクスポート実行
         window.open('/api/export/csv', '_blank');
-        
-        // エクスポート完了後に営業セッション選択ダイアログを表示
         setTimeout(() => {
             showSessionEndDialog();
-        }, 2000); // CSVダウンロード開始を待つ
+        }, 2000); 
         
     } catch (error) {
         console.error('CSVエクスポートエラー:', error);
@@ -2152,7 +1991,6 @@ async function downloadCsv() {
     }
 }
 
-// 営業セッション終了選択ダイアログ
 function showSessionEndDialog() {
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
@@ -2175,16 +2013,13 @@ function showSessionEndDialog() {
     
     document.body.appendChild(modal);
     
-    // モーダル外クリックでは閉じないように設定
     modal.addEventListener('click', (e) => {
         if (e.target === modal) {
-            // 営業継続を選択したとみなす
             continueSession();
         }
     });
 }
 
-// 営業継続
 function continueSession() {
     const modal = document.querySelector('.modal-overlay');
     if (modal) {
@@ -2193,7 +2028,6 @@ function continueSession() {
     alert('営業を継続します。現在のデータが保持されます。');
 }
 
-// 営業セッション終了確認
 function confirmEndSession() {
     const confirmed = confirm(
         '⚠️ 営業セッション終了の確認\n\n' +
@@ -2209,7 +2043,6 @@ function confirmEndSession() {
     }
 }
 
-// 営業セッション終了実行
 async function endSession() {
     try {
         const response = await fetch('/api/session/end', {
@@ -2218,18 +2051,13 @@ async function endSession() {
         });
         
         if (response.ok) {
-            // モーダルを閉じる
             const modal = document.querySelector('.modal-overlay');
             if (modal) {
                 document.body.removeChild(modal);
             }
-            
-            // 成功メッセージ
             alert('🎉 営業セッションが終了しました。\n新しいセッションを開始してください。');
-            
-            // データを再読み込みして新しいセッション登録画面を表示
             await loadStateData();
-            state.page = 'order'; // 最初の画面に戻る
+            state.page = 'order'; 
             render();
             
         } else {
@@ -2244,25 +2072,59 @@ async function endSession() {
 }
 
 async function restoreLatest() {
-    if (!confirm('最新のスナップショットに復元しますか？')) return;
+    if (!confirm('最新のスナップショット + WAL ログから復元しますか？\n\n※電源断前の状態に戻ります')) return;
+    
+    const resultDiv = document.getElementById('api-result');
+    if (resultDiv) {
+        resultDiv.innerHTML = '<div class="card"><p>⏳ 復元処理中...</p></div>';
+    }
     
     try {
-        const response = await fetch('/api/recover/restoreLatest', { method: 'POST' });
+        const response = await fetch('/api/recover', { method: 'POST' });
         const result = await response.json();
         
         if (result.ok) {
-            alert(`復元完了: ${result.lastTs}`);
-            loadStateData();
+            console.log('復元成功:', result);
+            if (resultDiv) {
+                resultDiv.innerHTML = `
+                    <div class="card" style="border-left-color: #28a745;">
+                        <h3>✅ 復旧成功</h3>
+                        <p><strong>適用時刻:</strong> ${result.lastTs || '-'}</p>
+                        <p style="color: #666; margin-top: 10px;">スナップショット + WAL ログから状態を復元しました。<br>画面を更新して最新状態を確認してください。</p>
+                    </div>
+                `;
+            }
+            // 最新状態を取得してUI同期
+            await loadStateData();
+            alert(`✅ 復元完了\n\n適用時刻: ${result.lastTs}`);
         } else {
-            alert(`復元失敗: ${result.error}`);
+            console.error('復元失敗:', result.error);
+            if (resultDiv) {
+                resultDiv.innerHTML = `
+                    <div class="card" style="border-left-color: #dc3545;">
+                        <h3>❌ 復旧失敗</h3>
+                        <p><strong>エラー:</strong> ${result.error || 'unknown error'}</p>
+                        <p style="color: #666; margin-top: 10px;">復元処理中にエラーが発生しました。</p>
+                    </div>
+                `;
+            }
+            alert(`❌ 復元失敗: ${result.error}`);
         }
     } catch (error) {
+        console.error('通信エラー:', error);
+        if (resultDiv) {
+            resultDiv.innerHTML = `
+                <div class="card" style="border-left-color: #dc3545;">
+                    <h3>❌ 復旧失敗</h3>
+                    <p><strong>エラー:</strong> ${error.message}</p>
+                    <p style="color: #666; margin-top: 10px;">通信エラーが発生しました。ネットワーク接続を確認してください。</p>
+                </div>
+            `;
+        }
         alert(`通信エラー: ${error.message}`);
     }
 }
 
-// API ping テスト
-// 注文詳細モーダル表示
 function showOrderDetail(orderNo) {
     if (!state.data) return;
     
@@ -2321,7 +2183,6 @@ function showOrderDetail(orderNo) {
     document.body.appendChild(modal);
 }
 
-// モーダルを閉じる
 function closeModal() {
     const modal = document.querySelector('.modal-backdrop');
     if (modal) {
@@ -2329,11 +2190,8 @@ function closeModal() {
     }
 }
 
-// 状態に応じたアクションボタンを生成
 function getStatusActions(order) {
     const actions = [];
-    
-    // 旧システム（機能している方のみ使用）
     if (order.status === 'COOKING' && !order.cooked) {
         actions.push(`
             <button class="btn btn-warning" onclick="updateOrderStatus('${order.orderNo}', 'DONE')" 
@@ -2362,7 +2220,6 @@ function getStatusActions(order) {
     ` : '';
 }
 
-// 状態ラベル
 function getStatusLabel(status) {
     const labels = {
         'COOKING': '調理中',
@@ -2374,13 +2231,11 @@ function getStatusLabel(status) {
     return labels[status] || status;
 }
 
-// 注文状態更新（旧システム・PATCH API使用）
-// 新システムが機能していないため、こちらを使用
 async function updateOrderStatus(orderNo, newStatus) {
     console.log(`注文状態更新: ${orderNo} → ${newStatus}`);
     
     try {
-        // 旧APIを使用（PATCH /api/orders/:id）
+
         const response = await fetch(`/api/orders/${orderNo}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -2403,13 +2258,11 @@ async function updateOrderStatus(orderNo, newStatus) {
     }
 }
 
-// 既存の completeOrder を旧システムにリダイレクト（互換性保持）
 function completeOrder(orderNo) {
     console.warn('⚠️ completeOrder は非推奨です。updateOrderStatus を使用してください');
     updateOrderStatus(orderNo, 'DONE');
 }
 
-// システム完全初期化
 async function resetSystem() {
     if (!confirm('⚠️ 警告: システムを完全初期化します。\n\n• 全ての注文データが削除されます\n• 注文番号カウンタがリセットされます\n• 不揮発性メモリがクリアされます\n\n本当に実行しますか？')) {
         return;
@@ -2428,11 +2281,9 @@ async function resetSystem() {
         if (response.ok) {
             const result = await response.json();
             alert('✅ システム初期化完了\n\n' + result.message);
-            
-            // データ再読み込み
+
             await loadStateData();
             
-            // カートもクリア
             cart = [];
             updateCartDisplay();
             
@@ -2446,35 +2297,27 @@ async function resetSystem() {
     }
 }
 
-// 日本語印刷テスト
-// testJapanesePrint() function removed to reduce code size
-
-// 注文済み一覧の表示・非表示切り替え
 function toggleCompletedOrders() {
     const widget = document.getElementById('completed-orders-widget');
     const button = document.getElementById('toggle-completed-btn');
     
     if (widget.style.display === 'none') {
-        // 表示する
         widget.style.display = 'block';
         button.textContent = '📋 注文済み一覧非表示';
         loadCompletedOrders();
     } else {
-        // 非表示にする
         widget.style.display = 'none';
         button.textContent = '📋 注文済み一覧表示';
     }
 }
 
-// 注文済み一覧を読み込み
 function loadCompletedOrders() {
     if (!state.data) return;
     
-    // 調理中、調理完了、品出し完了、提供済み、キャンセルされた注文を表示
     const completedOrders = state.data.orders
         .filter(order => ['COOKING', 'DONE', 'READY', 'DELIVERED', 'CANCELLED'].includes(order.status))
-        .sort((a, b) => b.ts - a.ts)  // 新しい順
-        .slice(0, 20);  // 最新20件
+        .sort((a, b) => b.ts - a.ts) 
+        .slice(0, 20); 
     
     const listDiv = document.getElementById('completed-orders-list');
     
@@ -2534,19 +2377,18 @@ function loadCompletedOrders() {
     }).join('');
 }
 
-// 状態に応じた色を返す
 function getStatusColor(status) {
     const colors = {
-        'COOKING': '#ffc107',    // 黄色
-        'DONE': '#28a745',       // 緑色
-        'READY': '#17a2b8',      // 青色
-        'DELIVERED': '#6c757d',  // グレー
-        'CANCELLED': '#dc3545'   // 赤色
+        'COOKING': '#ffc107',   
+        'DONE': '#28a745',     
+        'READY': '#17a2b8',    
+        'DELIVERED': '#6c757d',  
+        'CANCELLED': '#dc3545'   
     };
     return colors[status] || '#6c757d';
 }
 
-// 売上統計計算
+
 function calculateSalesStats() {
     if (!state.data || !state.data.orders) {
         return {
@@ -2565,15 +2407,11 @@ function calculateSalesStats() {
     
     let totalRevenue = 0;
     let totalItems = 0;
-    
-    // 各注文を処理
+
     orders.forEach(order => {
-        // 状況カウント
         statusCounts[order.status] = (statusCounts[order.status] || 0) + 1;
-        
-        // 商品と売上を集計
         order.items.forEach(item => {
-            if (item.kind === "ADJUST") return; // 調整行は除外
+            if (item.kind === "ADJUST") return;
             
             const unitPrice = item.unitPriceApplied || item.unitPrice || 0;
             const qty = item.qty || 1;
@@ -2597,8 +2435,7 @@ function calculateSalesStats() {
             }
         });
     });
-    
-    // 商品統計を配列に変換し、売上順にソート
+
     const itemStats = Array.from(itemMap.values())
         .sort((a, b) => b.revenue - a.revenue)
         .map(item => ({
@@ -2618,64 +2455,79 @@ function calculateSalesStats() {
     };
 }
 
-// 売上統計更新
 function refreshSalesStats() {
     if (state.settingsTab === 'sales') {
-        render(); // 設定画面を再レンダリング
+        render(); 
     }
 }
 
-// レシート再印刷機能
 async function reprintReceipt(orderNo) {
-    console.log('再印刷リクエスト: 注文番号=', orderNo, 'タイプ=', typeof orderNo);
+    console.log('[reprintReceipt] 開始: 注文番号=', orderNo, 'タイプ=', typeof orderNo);
     
+    // 確認ダイアログ
     if (!confirm(`注文 #${orderNo} のレシートを再印刷しますか？`)) {
+        console.log('[reprintReceipt] ユーザーがキャンセルしました');
         return;
     }
     
-    // 注文データの存在確認
+    // 注文の存在確認
     if (state.data && state.data.orders) {
         const order = state.data.orders.find(o => o.orderNo === orderNo);
-        console.log('注文データ検索結果:', order);
+        console.log('[reprintReceipt] 注文データ検索結果:', order);
         if (order) {
-            console.log('注文詳細:', {
+            console.log('[reprintReceipt] 注文詳細:', {
                 orderNo: order.orderNo,
                 status: order.status,
                 itemCount: order.items ? order.items.length : 0
             });
+            
+            // キャンセル済み注文は再印刷不可
+            if (order.status === 'CANCELLED') {
+                alert(`❌ キャンセル済みの注文は再印刷できません\n注文番号: ${orderNo}`);
+                return;
+            }
         } else {
-            console.error('注文が見つかりません:', orderNo);
+            console.error('[reprintReceipt] 注文が見つかりません:', orderNo);
+            alert(`❌ 注文 #${orderNo} が見つかりません`);
+            return;
         }
     }
     
     try {
         const requestBody = { orderNo: orderNo };
-        console.log('送信データ:', requestBody);
+        console.log('[reprintReceipt] 送信データ:', requestBody);
         
         const response = await fetch('/api/orders/reprint', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json'
+            },
             body: JSON.stringify(requestBody)
         });
         
-        console.log('レスポンス:', response.status, response.statusText);
+        console.log('[reprintReceipt] レスポンス:', response.status, response.statusText);
         
         if (response.ok) {
             const result = await response.json();
-            console.log('成功:', result);
-            alert(`✅ レシート再印刷を実行しました\n注文番号: ${orderNo}`);
+            console.log('[reprintReceipt] 成功:', result);
+            alert(`✅ レシート再印刷を実行しました\n注文番号: ${orderNo}\n\n${result.message || 'プリンタキューに追加しました'}`);
+            // 画面を更新
+            await loadStateData();
         } else {
-            const errorData = await response.json();
-            console.error('エラーレスポンス:', errorData);
-            alert(`❌ 再印刷に失敗しました: ${errorData.error || '不明なエラー'}`);
+            // エラーレスポンスの処理
+            let errorMessage = `HTTP ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch {
+                const errorText = await response.text();
+                errorMessage = errorText || errorMessage;
+            }
+            console.error('[reprintReceipt] エラーレスポンス:', errorMessage);
+            alert(`❌ 再印刷に失敗しました: ${errorMessage}`);
         }
     } catch (error) {
-        console.error('再印刷エラー:', error);
-        alert(`❌ 通信エラー: ${error.message}`);
+        console.error('[reprintReceipt] 通信エラー:', error);
+        alert(`❌ 通信エラー: ${error.message}\n\nネットワーク接続を確認してください。`);
     }
 }
-
-// T4. 新印刷システムテスト
-// testNewPrintSystem() function removed to reduce code size
-
-// testPrintSelfCheck() function removed to reduce code size

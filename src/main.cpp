@@ -4,39 +4,35 @@
 #include <LittleFS.h>
 #include <time.h>
 #include <sntp.h>
+#include <vector>
+#include <algorithm>
 #include "ws_hub.h"
 #include "server_routes.h"
 #include "store.h"
 #include "printer_queue.h"
 #include "printer_render.h"
 
-// WiFi設定
 const char* ap_ssid = "KDS-ESP32";
 const char* ap_password = "kds-2025";
 
-// 家庭用WiFi設定（NTP時刻同期用）
-const char* sta_ssid = "";     // 家庭用WiFi SSIDを設定
-const char* sta_password = ""; // 家庭用WiFiパスワードを設定
+const char* sta_ssid = "";
+const char* sta_password = "";
 
-// NTPサーバー設定
 const char* ntp_server1 = "ntp.nict.jp";
 const char* ntp_server2 = "time.google.com";
 const char* ntp_server3 = "pool.ntp.org";
 
 AsyncWebServer server(80);
 
-// 時刻同期関数
 bool syncTimeWithNTP() {
     Serial.println("[TIME] NTP時刻同期開始");
     
-    // NTPサーバー設定
-    configTime(9 * 3600, 0, ntp_server1, ntp_server2, ntp_server3); // JST = UTC+9
+    configTime(9 * 3600, 0, ntp_server1, ntp_server2, ntp_server3);
     
-    // 時刻同期待機（10秒タイムアウト）
     int timeout = 10;
     while (timeout > 0) {
         time_t now = time(nullptr);
-        if (now > 1000000000) { // 有効なタイムスタンプ
+        if (now > 1000000000) {
             struct tm timeinfo;
             localtime_r(&now, &timeinfo);
             Serial.printf("[TIME] NTP時刻同期成功: %04d/%02d/%02d %02d:%02d:%02d\n",
@@ -53,7 +49,6 @@ bool syncTimeWithNTP() {
     return false;
 }
 
-// 現在時刻をフォーマットした文字列で取得
 String getCurrentDateTime() {
     time_t now = time(nullptr);
     struct tm timeinfo;
@@ -64,32 +59,28 @@ String getCurrentDateTime() {
     return String(buffer);
 }
 
-// 時刻が有効かチェック
 bool isTimeValid() {
     time_t now = time(nullptr);
-    return now > 1000000000; // 2001年以降なら有効
+    return now > 1000000000;
 }
 
 void setup() {
-    // M5Stack ATOM 初期化
     M5.begin();
     
     Serial.begin(115200);
     Serial.println("KDS システム起動中...");
     
-    // タイムゾーンを日本時間に設定
     setenv("TZ", "JST-9", 1);
     tzset();
     Serial.println("タイムゾーン設定: JST-9");
     
-    // WiFi接続試行（時刻同期用）
     bool wifi_connected = false;
     if (strlen(sta_ssid) > 0) {
         Serial.printf("[WIFI] STAモードで%sに接続試行...\n", sta_ssid);
         WiFi.mode(WIFI_AP_STA);
         WiFi.begin(sta_ssid, sta_password);
         
-        int wifi_timeout = 10; // 10秒タイムアウト
+        int wifi_timeout = 10;
         while (WiFi.status() != WL_CONNECTED && wifi_timeout > 0) {
             delay(1000);
             Serial.print(".");
@@ -100,27 +91,23 @@ void setup() {
             wifi_connected = true;
             Serial.printf("\n[WIFI] STA接続成功: %s\n", WiFi.localIP().toString().c_str());
             
-            // NTP時刻同期実行
             syncTimeWithNTP();
         } else {
             Serial.println("\n[WIFI] STA接続失敗、APモードのみで継続");
         }
     }
     
-    // APモードで起動（必須）
     if (!wifi_connected) {
         WiFi.mode(WIFI_AP);
     }
     WiFi.softAP(ap_ssid, ap_password);
     
-    // LittleFS 初期化
     if (!LittleFS.begin()) {
         Serial.println("LittleFS マウント失敗");
         return;
     }
     Serial.println("LittleFS マウント成功");
     
-    // データストレージ初期化（スナップショット復元 + 初期メニュー）
     if (!snapshotLoad()) {
         Serial.println("スナップショット読込に失敗、初期メニューで開始");
     }
@@ -137,32 +124,24 @@ void setup() {
         Serial.printf("現在時刻: %s\n", getCurrentDateTime().c_str());
     }
     
-    // WebSocket初期化
     initWsHub(server);
     
-    // HTTP API ルート初期化
     initHttpRoutes(server);
     
-    // 静的ファイル配信（PWA）
     server.serveStatic("/", LittleFS, "/www/").setDefaultFile("index.html");
     
-    // サーバー開始
     server.begin();
     Serial.println("WebServer 開始");
     
-    // ATOM Printerキット記事推奨初期化
     extern HardwareSerial printerSerial;
     Serial.println("ATOM Printerキット記事仕様で準備中...");
     
-    // Serial2事前設定クリア
     printerSerial.end();
     delay(200);
     
-    // プリンタレンダラー初期化 (記事仕様)
     if (g_printerRenderer.initialize(&printerSerial)) {
         Serial.println("[PRINT] ATOM Printer renderer initialized - article specs");
         
-        // T5. 起動時に完全初期化を実行 (記事推奨手順)
         g_printerRenderer.printerInit();
         Serial.println("起動時プリンタ記事仕様初期化完了");
     } else {
@@ -173,11 +152,57 @@ void setup() {
 }
 
 void loop() {
-    // メインループ処理
     M5.update();
     
-    // 印刷キュー処理
     tickPrintQueue();
+    
+    // 30秒ごとのスナップショット
+    static uint32_t lastSnapshotMs = 0;
+    if (millis() - lastSnapshotMs >= 30000) {
+        Serial.println("[SNAPSHOT] 30秒タイマー: スナップショット保存開始");
+        
+        if (snapshotSave()) {
+            Serial.println("[SNAPSHOT] スナップショット保存成功");
+            
+            // WALローテーション
+            if (LittleFS.exists("/kds/wal.log")) {
+                uint32_t epoch = time(nullptr);
+                String archiveName = "/kds/wal." + String(epoch) + ".log";
+                
+                if (LittleFS.rename("/kds/wal.log", archiveName.c_str())) {
+                    Serial.printf("[WAL] ローテーション完了: %s\n", archiveName.c_str());
+                    
+                    // 古いWALファイルを削除（最新2世代のみ保持）
+                    File root = LittleFS.open("/kds");
+                    std::vector<String> walFiles;
+                    while (File file = root.openNextFile()) {
+                        String fname = String(file.name());
+                        if (fname.startsWith("wal.") && fname.endsWith(".log")) {
+                            walFiles.push_back("/kds/" + fname);
+                        }
+                        file.close();
+                    }
+                    root.close();
+                    
+                    // ファイル名でソート（新しい順）
+                    std::sort(walFiles.begin(), walFiles.end(), std::greater<String>());
+                    
+                    // 3つ目以降を削除
+                    for (size_t i = 2; i < walFiles.size(); i++) {
+                        if (LittleFS.remove(walFiles[i].c_str())) {
+                            Serial.printf("[WAL] 古いファイル削除: %s\n", walFiles[i].c_str());
+                        }
+                    }
+                } else {
+                    Serial.println("[WAL] エラー: ローテーション失敗");
+                }
+            }
+        } else {
+            Serial.println("[SNAPSHOT] 警告: スナップショット保存失敗");
+        }
+        
+        lastSnapshotMs = millis();
+    }
     
     delay(10);
 }

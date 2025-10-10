@@ -5,28 +5,24 @@
 #include <time.h>
 #include <sys/time.h>
 
-// グローバル状態
 static State g_state;
 
 State& S() {
     return g_state;
 }
 
-// NVS採番用
 static Preferences prefs;
 
 String allocateOrderNo() {
     prefs.begin("kds", false);
     uint16_t seq = prefs.getUShort("nextSeq", 1);
     
-    // 衝突回避（最大100回ループ）
     for (int i = 0; i < 100; i++) {
         String candidate = String(seq);
         while (candidate.length() < 4) {
             candidate = "0" + candidate;
         }
         
-        // 既存注文に同じ番号がないかチェック
         bool exists = false;
         for (const auto& order : S().orders) {
             if (order.orderNo == candidate) {
@@ -36,7 +32,6 @@ String allocateOrderNo() {
         }
         
         if (!exists) {
-            // 次回用にインクリメント
             seq++;
             if (seq > 9999) seq = 1;
             prefs.putUShort("nextSeq", seq);
@@ -49,7 +44,6 @@ String allocateOrderNo() {
     }
     
     prefs.end();
-    // フォールバック
     return "9999";
 }
 
@@ -85,14 +79,12 @@ String generateSkuSide() {
     return sku;
 }
 
-// A/B交互保存の実装
 static bool currentSnapshotIsA = true;
 
 bool snapshotSave() {
     Serial.printf("=== snapshotSave開始: 注文数=%d, メニュー数=%d ===\n", 
                   S().orders.size(), S().menu.size());
     
-    // ディレクトリ作成（存在しない場合）
     if (!LittleFS.exists("/kds")) {
         if (!LittleFS.mkdir("/kds")) {
             Serial.println("ディレクトリ作成失敗: /kds");
@@ -102,8 +94,6 @@ bool snapshotSave() {
     }
     
     JsonDocument doc;
-    
-    // Settings
     doc["settings"]["catalogVersion"] = S().settings.catalogVersion;
     doc["settings"]["chinchiro"]["enabled"] = S().settings.chinchiro.enabled;
     JsonArray mult = doc["settings"]["chinchiro"]["multipliers"].to<JsonArray>();
@@ -119,18 +109,14 @@ bool snapshotSave() {
     doc["settings"]["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
     doc["settings"]["qrPrint"]["content"] = S().settings.qrPrint.content;
     
-    // Session
     doc["session"]["sessionId"] = S().session.sessionId;
     doc["session"]["startedAt"] = S().session.startedAt;
     doc["session"]["exported"] = S().session.exported;
     doc["session"]["nextOrderSeq"] = S().session.nextOrderSeq;
     
-    // Printer
     doc["printer"]["paperOut"] = S().printer.paperOut;
     doc["printer"]["overheat"] = S().printer.overheat;
     doc["printer"]["holdJobs"] = S().printer.holdJobs;
-    
-    // Menu
     JsonArray menuArray = doc["menu"].to<JsonArray>();
     for (const auto& item : S().menu) {
         JsonObject menuItem = menuArray.add<JsonObject>();
@@ -146,7 +132,6 @@ bool snapshotSave() {
         menuItem["price_as_side"] = item.price_as_side;
     }
     
-    // Orders
     JsonArray ordersArray = doc["orders"].to<JsonArray>();
     for (const auto& order : S().orders) {
         JsonObject orderObj = ordersArray.add<JsonObject>();
@@ -155,7 +140,6 @@ bool snapshotSave() {
         orderObj["ts"] = order.ts;
         orderObj["printed"] = order.printed;
         orderObj["cancelReason"] = order.cancelReason;
-        // 追加: 呼び出し画面関連フラグを保存
         orderObj["cooked"] = order.cooked;
         orderObj["picked_up"] = order.picked_up;
         orderObj["pickup_called"] = order.pickup_called;
@@ -179,7 +163,6 @@ bool snapshotSave() {
         }
     }
     
-    // ファイル保存
     String filename = currentSnapshotIsA ? "/kds/snapA.json" : "/kds/snapB.json";
     File file = LittleFS.open(filename, "w");
     if (!file) {
@@ -191,7 +174,6 @@ bool snapshotSave() {
     file.flush();
     file.close();
     
-    // 次回は反対のファイル
     currentSnapshotIsA = !currentSnapshotIsA;
     
     Serial.printf("スナップショット保存完了: %s\n", filename.c_str());
@@ -199,20 +181,17 @@ bool snapshotSave() {
 }
 
 bool snapshotLoad() {
-    // A/B両方のタイムスタンプをチェック
     File fileA = LittleFS.open("/kds/snapA.json", "r");
     File fileB = LittleFS.open("/kds/snapB.json", "r");
     
     bool useA = true;
     if (fileA && fileB) {
-        // 両方ある場合は新しい方を使用
         time_t timeA = fileA.getLastWrite();
         time_t timeB = fileB.getLastWrite();
         useA = (timeA >= timeB);
     } else if (fileB && !fileA) {
         useA = false;
     } else if (!fileA && !fileB) {
-        // 両方ない場合は初期化
         fileA.close();
         fileB.close();
         ensureInitialMenu();
@@ -237,8 +216,6 @@ bool snapshotLoad() {
         ensureInitialMenu();
         return false;
     }
-    
-    // データ復元
     if (doc["settings"].is<JsonObject>()) {
         S().settings.catalogVersion = doc["settings"]["catalogVersion"] | 1;
         S().settings.chinchiro.enabled = doc["settings"]["chinchiro"]["enabled"] | true;
@@ -272,8 +249,6 @@ bool snapshotLoad() {
         S().printer.overheat = doc["printer"]["overheat"] | false;
         S().printer.holdJobs = doc["printer"]["holdJobs"] | 0;
     }
-    
-    // Menu復元
     S().menu.clear();
     if (doc["menu"].is<JsonArray>()) {
         for (JsonVariantConst v : doc["menu"].as<JsonArrayConst>()) {
@@ -292,7 +267,6 @@ bool snapshotLoad() {
         }
     }
     
-    // Orders復元  
     S().orders.clear();
     if (doc["orders"].is<JsonArray>()) {
         for (JsonVariantConst v : doc["orders"].as<JsonArrayConst>()) {
@@ -302,7 +276,6 @@ bool snapshotLoad() {
             order.ts = v["ts"] | 0;
             order.printed = v["printed"] | false;
             order.cancelReason = v["cancelReason"] | "";
-            // 追加: 呼び出し画面関連フラグを復元
             order.cooked = v["cooked"] | false;
             order.picked_up = v["picked_up"] | false;
             order.pickup_called = v["pickup_called"] | false;
@@ -334,7 +307,6 @@ bool snapshotLoad() {
     Serial.printf("スナップショット読込完了: %s\n", filename.c_str());
     Serial.printf("復元されたデータ: 注文数=%d件, メニュー数=%d件\n", S().orders.size(), S().menu.size());
     
-    // メニューが空の場合、初期メニューを投入
     if (S().menu.empty()) {
         Serial.println("スナップショットにメニューが含まれていないため、初期メニューを投入");
         ensureInitialMenu();
@@ -346,92 +318,260 @@ bool snapshotLoad() {
 }
 
 bool walAppend(const String& line) {
-    // ディレクトリ作成（存在しない場合）
     if (!LittleFS.exists("/kds")) {
         if (!LittleFS.mkdir("/kds")) {
-            Serial.println("ディレクトリ作成失敗: /kds");
+            Serial.println("[WAL] ディレクトリ作成失敗: /kds");
             return false;
         }
-        Serial.println("ディレクトリ作成完了: /kds");
     }
     
-    File file = LittleFS.open("/kds/wal.log", "a");
+    File file = LittleFS.open("/kds/wal.log", FILE_APPEND);
     if (!file) {
-        Serial.println("WAL追記失敗");
+        Serial.println("[WAL] ファイルオープン失敗");
         return false;
     }
     
-    // タイムスタンプ付きで記録
-    uint32_t ts = time(nullptr);
-    file.printf("%u,%s\n", ts, line.c_str());
+    // JSON形式で書き込み: 1行 = 1 JSON
+    file.println(line);
     file.flush();
     file.close();
     
-    Serial.printf("WAL追記: %u,%s\n", ts, line.c_str());
+    Serial.printf("[WAL] 追記成功: %s\n", line.c_str());
     return true;
 }
 
 bool recoverToLatest(String &outLastTs) {
     Serial.println("=== recoverToLatest開始 ===");
     
-    // まずスナップショット読込
-    Serial.println("スナップショット読み込み中...");
+    // 1. スナップショットを読み込む
+    Serial.println("[RECOVER] スナップショット読み込み中...");
     if (!snapshotLoad()) {
         outLastTs = "snapshot load failed";
-        Serial.println("エラー: スナップショット読み込み失敗");
+        Serial.println("[RECOVER] エラー: スナップショット読み込み失敗");
         return false;
     }
     
-    Serial.printf("スナップショット読み込み成功: 注文数=%d, メニュー数=%d\n", 
+    Serial.printf("[RECOVER] スナップショット読み込み成功: 注文数=%d, メニュー数=%d\n", 
                   S().orders.size(), S().menu.size());
     
-    // WAL適用
+    // 2. WALログを読み込んで適用
     File walFile = LittleFS.open("/kds/wal.log", "r");
     if (!walFile) {
-        outLastTs = "no WAL file";
-        return true; // WALがないのは正常
+        Serial.println("[RECOVER] WALファイルなし、スナップショットのみで復元完了");
+        outLastTs = "snapshot only";
+        return true;
     }
     
+    int entriesApplied = 0;
     String lastTimestamp = "";
+    
     while (walFile.available()) {
         String line = walFile.readStringUntil('\n');
         line.trim();
         if (line.length() == 0) continue;
         
-        int firstComma = line.indexOf(',');
-        if (firstComma < 0) continue;
+        // JSON解析
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, line);
+        if (error) {
+            Serial.printf("[RECOVER] JSON解析エラー、スキップ: %s\n", line.c_str());
+            continue;
+        }
         
-        String tsStr = line.substring(0, firstComma);
-        String operation = line.substring(firstComma + 1);
+        uint32_t ts = doc["ts"] | 0;
+        String action = doc["action"] | "";
         
-        // タイムスタンプ記録
-        lastTimestamp = tsStr;
+        if (action.isEmpty()) {
+            Serial.printf("[RECOVER] action不明、スキップ: %s\n", line.c_str());
+            continue;
+        }
         
-        // 操作解釈（簡易実装）
-        Serial.printf("WAL適用: %s - %s\n", tsStr.c_str(), operation.c_str());
+        lastTimestamp = String(ts);
         
-        // TODO: 実際の操作適用（ORDER_CREATE, MAIN_UPSERT等）
-        // 今回は基本ログ出力のみ
+        // actionごとの適用処理
+        if (action == "ORDER_CREATE") {
+            String orderNo = doc["orderNo"] | "";
+            if (orderNo.isEmpty()) continue;
+            
+            // 重複チェック（冪等性）
+            bool exists = false;
+            for (const auto& o : S().orders) {
+                if (o.orderNo == orderNo) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                Order newOrder;
+                newOrder.orderNo = orderNo;
+                newOrder.status = doc["status"] | "PENDING";
+                newOrder.ts = doc["ts"] | 0;
+                newOrder.printed = doc["printed"] | false;
+                newOrder.cooked = doc["cooked"] | false;
+                newOrder.pickup_called = doc["pickup_called"] | false;
+                newOrder.picked_up = doc["picked_up"] | false;
+                
+                // 注文明細を復元
+                if (doc["items"].is<JsonArray>()) {
+                    for (JsonVariantConst itemVar : doc["items"].as<JsonArrayConst>()) {
+                        LineItem item;
+                        item.sku = itemVar["sku"] | "";
+                        item.name = itemVar["name"] | "";
+                        item.qty = itemVar["qty"] | 1;
+                        item.unitPriceApplied = itemVar["unitPriceApplied"] | 0;
+                        item.priceMode = itemVar["priceMode"] | "";
+                        item.kind = itemVar["kind"] | "";
+                        item.unitPrice = itemVar["unitPrice"] | 0;
+                        item.discountName = itemVar["discountName"] | "";
+                        item.discountValue = itemVar["discountValue"] | 0;
+                        newOrder.items.push_back(item);
+                    }
+                }
+                
+                S().orders.push_back(newOrder);
+                Serial.printf("[RECOVER] ORDER_CREATE: %s (items=%d件)\n", orderNo.c_str(), newOrder.items.size());
+            }
+            
+        } else if (action == "ORDER_UPDATE") {
+            String orderNo = doc["orderNo"] | "";
+            String status = doc["status"] | "";
+            
+            for (auto& o : S().orders) {
+                if (o.orderNo == orderNo) {
+                    if (!status.isEmpty()) o.status = status;
+                    if (doc["cooked"].is<bool>()) o.cooked = doc["cooked"];
+                    if (doc["pickup_called"].is<bool>()) o.pickup_called = doc["pickup_called"];
+                    if (doc["picked_up"].is<bool>()) o.picked_up = doc["picked_up"];
+                    if (doc["printed"].is<bool>()) o.printed = doc["printed"];
+                    Serial.printf("[RECOVER] ORDER_UPDATE: %s (status=%s)\n", orderNo.c_str(), status.c_str());
+                    break;
+                }
+            }
+            
+        } else if (action == "ORDER_CANCEL") {
+            String orderNo = doc["orderNo"] | "";
+            String reason = doc["cancelReason"] | "";
+            
+            for (auto& o : S().orders) {
+                if (o.orderNo == orderNo) {
+                    o.status = "CANCELLED";
+                    o.cancelReason = reason;
+                    Serial.printf("[RECOVER] ORDER_CANCEL: %s (reason=%s)\n", orderNo.c_str(), reason.c_str());
+                    break;
+                }
+            }
+            
+        } else if (action == "ORDER_COOKED") {
+            String orderNo = doc["orderNo"] | "";
+            for (auto& o : S().orders) {
+                if (o.orderNo == orderNo) {
+                    o.cooked = true;
+                    o.pickup_called = true;
+                    Serial.printf("[RECOVER] ORDER_COOKED: %s\n", orderNo.c_str());
+                    break;
+                }
+            }
+            
+        } else if (action == "ORDER_PICKED") {
+            String orderNo = doc["orderNo"] | "";
+            for (auto& o : S().orders) {
+                if (o.orderNo == orderNo) {
+                    o.picked_up = true;
+                    o.pickup_called = false;
+                    Serial.printf("[RECOVER] ORDER_PICKED: %s\n", orderNo.c_str());
+                    break;
+                }
+            }
+            
+        } else if (action == "SETTINGS_UPDATE") {
+            // 設定更新
+            if (doc["chinchiro"].is<JsonObject>()) {
+                S().settings.chinchiro.enabled = doc["chinchiro"]["enabled"] | S().settings.chinchiro.enabled;
+                S().settings.chinchiro.rounding = doc["chinchiro"]["rounding"] | S().settings.chinchiro.rounding;
+            }
+            if (doc["qrPrint"].is<JsonObject>()) {
+                S().settings.qrPrint.enabled = doc["qrPrint"]["enabled"] | S().settings.qrPrint.enabled;
+                S().settings.qrPrint.content = doc["qrPrint"]["content"] | S().settings.qrPrint.content;
+            }
+            if (doc["store"].is<JsonObject>()) {
+                S().settings.store.name = doc["store"]["name"] | S().settings.store.name;
+                S().settings.store.nameRomaji = doc["store"]["nameRomaji"] | S().settings.store.nameRomaji;
+                S().settings.store.registerId = doc["store"]["registerId"] | S().settings.store.registerId;
+            }
+            Serial.println("[RECOVER] SETTINGS_UPDATE");
+            
+        } else if (action == "MAIN_UPSERT" || action == "SIDE_UPSERT") {
+            String sku = doc["sku"] | "";
+            if (sku.isEmpty()) continue;
+            
+            // 既存メニューを検索（冪等性）
+            MenuItem* existing = nullptr;
+            for (auto& m : S().menu) {
+                if (m.sku == sku) {
+                    existing = &m;
+                    break;
+                }
+            }
+            
+            if (existing) {
+                // 更新
+                existing->name = doc["name"] | existing->name;
+                existing->nameRomaji = doc["nameRomaji"] | existing->nameRomaji;
+                existing->active = doc["active"] | existing->active;
+                if (action == "MAIN_UPSERT") {
+                    existing->price_normal = doc["price_normal"] | existing->price_normal;
+                    existing->presale_discount_amount = doc["presale_discount_amount"] | existing->presale_discount_amount;
+                } else {
+                    existing->price_single = doc["price_single"] | existing->price_single;
+                    existing->price_as_side = doc["price_as_side"] | existing->price_as_side;
+                }
+                Serial.printf("[RECOVER] %s (update): %s\n", action.c_str(), sku.c_str());
+            } else {
+                // 新規追加
+                MenuItem newItem;
+                newItem.sku = sku;
+                newItem.name = doc["name"] | "";
+                newItem.nameRomaji = doc["nameRomaji"] | "";
+                newItem.category = (action == "MAIN_UPSERT") ? "MAIN" : "SIDE";
+                newItem.active = doc["active"] | true;
+                if (action == "MAIN_UPSERT") {
+                    newItem.price_normal = doc["price_normal"] | 0;
+                    newItem.presale_discount_amount = doc["presale_discount_amount"] | 0;
+                } else {
+                    newItem.price_single = doc["price_single"] | 0;
+                    newItem.price_as_side = doc["price_as_side"] | 0;
+                }
+                S().menu.push_back(newItem);
+                Serial.printf("[RECOVER] %s (insert): %s\n", action.c_str(), sku.c_str());
+            }
+        }
+        
+        entriesApplied++;
     }
     
     walFile.close();
     
-    // 人間readable形式に変換
+    // 3. 復元完了
     if (lastTimestamp.length() > 0) {
         uint32_t ts = lastTimestamp.toInt();
-        struct tm* timeinfo = localtime((time_t*)&ts);
-        char buffer[32];
-        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
-        outLastTs = String(buffer);
+        if (ts > 1000000000) { // epoch time
+            struct tm* timeinfo = localtime((time_t*)&ts);
+            char buffer[32];
+            strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+            outLastTs = String(buffer);
+        } else { // millis
+            outLastTs = String(ts) + "ms";
+        }
     } else {
-        outLastTs = "no operations";
+        outLastTs = "no WAL entries";
     }
     
-    Serial.printf("復元完了: 最終タイムスタンプ %s\n", outLastTs.c_str());
+    Serial.printf("[RECOVER] wal apply: %d entries (lastTs=%s)\n", entriesApplied, outLastTs.c_str());
+    Serial.printf("[RECOVER] 復元完了: 注文数=%d, メニュー数=%d\n", S().orders.size(), S().menu.size());
+    
     return true;
 }
 
-// メニューを強制的に再作成（デバッグ用）
 void forceCreateInitialMenu() {
     Serial.println("=== 初期メニュー強制作成開始 ===");
     int previousCount = S().menu.size();
@@ -444,21 +584,17 @@ void forceCreateInitialMenu() {
     
     Serial.printf("初期メニュー強制作成完了: %d件\n", S().menu.size());
     
-    // 作成されたメニューを確認
     for (int i = 0; i < S().menu.size(); i++) {
         Serial.printf("作成[%d]: %s (%s) - %s\n", 
                      i, S().menu[i].sku.c_str(), S().menu[i].name.c_str(), S().menu[i].category.c_str());
     }
 }
 
-// 実際のメニューアイテム作成ロジック
 void createInitialMenuItems() {
-    // デフォルトちんちろ設定
     S().settings.chinchiro.enabled = true;
     S().settings.chinchiro.multipliers = {0, 0.5, 1, 2, 3};
     S().settings.chinchiro.rounding = "round";
     
-    // セッションID生成
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
         char buffer[32];
@@ -469,7 +605,6 @@ void createInitialMenuItems() {
     }
     S().session.startedAt = time(nullptr);
     
-    // メインメニュー（A/B/Cバーガー）
     MenuItem mainA;
     mainA.sku = "main_0001";
     mainA.name = "Aバーガー";
@@ -477,7 +612,7 @@ void createInitialMenuItems() {
     mainA.category = "MAIN";
     mainA.active = true;
     mainA.price_normal = 500;
-    mainA.price_presale = 0; // 計算で求める
+    mainA.price_presale = 0;
     mainA.presale_discount_amount = -100;
     S().menu.push_back(mainA);
     
@@ -503,7 +638,6 @@ void createInitialMenuItems() {
     mainC.presale_discount_amount = -100;
     S().menu.push_back(mainC);
     
-    // サイドメニュー（ドリンクA-D）
     const char* drinks[] = {"ドリンクA", "ドリンクB", "ドリンクC", "ドリンクD"};
     const char* drinksRomaji[] = {"Drink A", "Drink B", "Drink C", "Drink D"};
     for (int i = 0; i < 4; i++) {
@@ -518,7 +652,6 @@ void createInitialMenuItems() {
         S().menu.push_back(drink);
     }
     
-    // ポテトS
     MenuItem potato;
     potato.sku = "side_0005";
     potato.name = "ポテトS";
@@ -531,7 +664,6 @@ void createInitialMenuItems() {
     
     Serial.printf("初期メニュー投入完了: %d件\n", S().menu.size());
     
-    // デバッグ: 投入されたメニューを出力
     Serial.println("=== 初期メニュー詳細 ===");
     for (int i = 0; i < S().menu.size(); i++) {
         const auto& item = S().menu[i];
@@ -554,12 +686,11 @@ void ensureInitialMenu() {
             Serial.printf("  [%d] %s (%s) - %s\n", 
                          i, S().menu[i].sku.c_str(), S().menu[i].name.c_str(), S().menu[i].category.c_str());
         }
-        return; // 既にメニューがある
+        return;
     }
     
     Serial.println("初期メニューを投入中...");
     createInitialMenuItems();
     
-    // 初期スナップショット保存
     snapshotSave();
 }

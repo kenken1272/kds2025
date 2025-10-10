@@ -1,5 +1,3 @@
-// KDS Service Worker - PWA オフライン対応
-
 const CACHE_NAME = 'kds-v7';
 const STATIC_ASSETS = [
     '/',
@@ -9,7 +7,6 @@ const STATIC_ASSETS = [
     '/manifest.webmanifest'
 ];
 
-// インストール時：静的アセットをキャッシュ
 self.addEventListener('install', (event) => {
     console.log('Service Worker: インストール中...');
     
@@ -26,7 +23,6 @@ self.addEventListener('install', (event) => {
     );
 });
 
-// アクティベート時：古いキャッシュを削除
 self.addEventListener('activate', (event) => {
     console.log('Service Worker: アクティベート中...');
     
@@ -49,14 +45,11 @@ self.addEventListener('activate', (event) => {
     );
 });
 
-// フェッチ時：Cache First 戦略
 self.addEventListener('fetch', (event) => {
-    // APIリクエストは常にネットワーク優先
     if (event.request.url.includes('/api/')) {
         event.respondWith(
             fetch(event.request)
                 .catch(() => {
-                    // API失敗時はエラーレスポンス
                     return new Response(
                         JSON.stringify({ error: 'Network unavailable' }), 
                         {
@@ -69,24 +62,19 @@ self.addEventListener('fetch', (event) => {
         return;
     }
     
-    // WebSocket接続は素通し
     if (event.request.url.includes('/ws')) {
         return;
     }
     
-    // 静的アセット：Cache First
     event.respondWith(
         caches.match(event.request)
             .then((cachedResponse) => {
                 if (cachedResponse) {
                     console.log('Service Worker: キャッシュから応答:', event.request.url);
                     return cachedResponse;
-                }
-                
-                // キャッシュにない場合はネットワークから取得
+                }    
                 return fetch(event.request)
                     .then((response) => {
-                        // 成功した場合はキャッシュに保存
                         if (response.status === 200) {
                             const responseClone = response.clone();
                             caches.open(CACHE_NAME)
@@ -97,7 +85,6 @@ self.addEventListener('fetch', (event) => {
                         return response;
                     })
                     .catch(() => {
-                        // ネットワークエラー時はオフラインページ
                         if (event.request.mode === 'navigate') {
                             return caches.match('/index.html');
                         }
