@@ -628,6 +628,7 @@ function renderSettingsPage() {
             <button class="nav-btn ${state.settingsTab === 'system' ? 'active' : ''}" onclick="switchSettingsTab('system')">システム設定</button>
             <button class="nav-btn ${state.settingsTab === 'sales' ? 'active' : ''}" onclick="switchSettingsTab('sales')">売上確認</button>
             <button class="nav-btn ${state.settingsTab === 'chinchiro' ? 'active' : ''}" onclick="switchSettingsTab('chinchiro')">ちんちろ</button>
+            <button class="nav-btn ${state.settingsTab === 'qrprint' ? 'active' : ''}" onclick="switchSettingsTab('qrprint')">プリント設定</button>
         </nav>
     `;
     
@@ -914,6 +915,43 @@ function renderSettingsPage() {
                 </div>
                 
                 <button class="btn btn-primary btn-large" onclick="saveChinchoiroSettings()" style="width: 100%; margin-top: 20px;">
+                    💾 設定を保存
+                </button>
+            </div>
+        `;
+    } else if (state.settingsTab === 'qrprint') {
+        tabContent = `
+            <div class="card">
+                <h3>🖨️ プリント設定</h3>
+                <p style="color: #666; margin-bottom: 20px;">レシート印刷時のQRコード設定</p>
+                
+                <div style="margin: 20px 0;">
+                    <label style="display: flex; align-items: center; gap: 10px; font-size: 1.1em;">
+                        <input type="checkbox" ${state.data.settings.qrPrint.enabled ? 'checked' : ''} id="qrprint-enabled" style="width: 20px; height: 20px;"> 
+                        <span>QRコード印刷を有効にする</span>
+                    </label>
+                    <small style="display: block; margin-top: 5px; color: #666;">有効にすると、レシートの最後にQRコードが印刷されます</small>
+                </div>
+                
+                <div style="margin: 20px 0;">
+                    <h4>QRコード内容</h4>
+                    <p style="color: #666; font-size: 0.9em;">URL、メッセージ等を入力してください</p>
+                    <textarea id="qrprint-content" 
+                              style="width: 100%; padding: 10px; font-size: 1em; border: 1px solid #ddd; border-radius: 5px; min-height: 100px; resize: vertical;"
+                              placeholder="例: https://example.com&#10;またはメッセージテキスト">${state.data.settings.qrPrint.content || ''}</textarea>
+                    <div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 5px;">
+                        <strong>使用例:</strong>
+                        <ul style="margin: 5px 0; padding-left: 20px;">
+                            <li>店舗ウェブサイトURL</li>
+                            <li>アンケートフォーム</li>
+                            <li>SNSアカウント</li>
+                            <li>クーポンコード</li>
+                            <li>お礼メッセージ</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <button class="btn btn-primary btn-large" onclick="saveQrPrintSettings()" style="width: 100%; margin-top: 20px;">
                     💾 設定を保存
                 </button>
             </div>
@@ -1891,6 +1929,28 @@ async function saveChinchoiroSettings() {
         
         if (response.ok) {
             alert('ちんちろ設定を保存しました');
+            loadStateData();
+        } else {
+            alert('保存に失敗しました');
+        }
+    } catch (error) {
+        alert(`通信エラー: ${error.message}`);
+    }
+}
+
+async function saveQrPrintSettings() {
+    const enabled = document.getElementById('qrprint-enabled').checked;
+    const content = document.getElementById('qrprint-content').value.trim();
+    
+    try {
+        const response = await fetch('/api/settings/qrprint', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled, content })
+        });
+        
+        if (response.ok) {
+            alert('QRプリント設定を保存しました');
             loadStateData();
         } else {
             alert('保存に失敗しました');

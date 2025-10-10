@@ -50,6 +50,10 @@ struct Settings {
         String nameRomaji{"KDS BURGER"};  // ローマ字表記（レシート印刷用）
     } store;
     bool presaleEnabled{true}; // 前売り機能ON/OFF
+    struct {
+        bool enabled{false};    // QRコード印刷ON/OFF
+        String content{""};     // QRコード内容（URL等）
+    } qrPrint;
 };
 
 // ========== 注文 ==========

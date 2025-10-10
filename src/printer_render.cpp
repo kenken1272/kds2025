@@ -652,14 +652,49 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
     String name = (i < od.itemsRomaji.size()) ? od.itemsRomaji[i] : String("-");
     int qty     = (i < od.quantities.size())  ? od.quantities[i]  : 1;
     int unit    = (i < od.prices.size())      ? od.prices[i]      : 0;
-    if (name.length() > 24) name = name.substring(0, 24);
-    sendLine(name);
-    sendLine("  x" + String(qty) + "   " + String(unit) + "yen");
+    
+    // 項目名を15文字に制限してパディング
+    if (name.length() > 15) name = name.substring(0, 15);
+    while (name.length() < 15) name += " ";
+    
+    // 数量部分（4文字固定）
+    String qtyStr = "x" + String(qty);
+    while (qtyStr.length() < 4) qtyStr = " " + qtyStr;
+    
+    // 金額部分（右寄せ、8文字固定、負の値にも対応）
+    String priceStr = String(unit) + "yen";
+    while (priceStr.length() < 8) priceStr = " " + priceStr;
+    
+    // 整列した行を作成: "NAME           x1    100yen" or "NAME           x1   -100yen"
+    sendLine(name + qtyStr + priceStr);
   }
   sendLine("------------------------------");
-  sendLine("Total: " + String(od.totalAmount) + " yen");
+  
+  // 合計金額も右寄せで整列
+  String totalLabel = "TOTAL";
+  while (totalLabel.length() < 19) totalLabel += " "; // 15+4文字分の空白
+  String totalPrice = String(od.totalAmount) + "yen";
+  while (totalPrice.length() < 8) totalPrice = " " + totalPrice;
+  sendLine(totalLabel + totalPrice);
   sendLine(isTimeValid() ? getCurrentDateTime() : "Time not synced");
   sendLine(toASCII(od.footerMessage));
+  
+  // QRコード印刷（設定で有効な場合）
+  if (S().settings.qrPrint.enabled && S().settings.qrPrint.content.length() > 0) {
+    sendLine(""); // 空行
+    // 中央寄せ（ESC a 1）
+    const uint8_t centerAlign[] = {0x1B, 0x61, 0x01};
+    _sendBytesChecked(printerSerial_, centerAlign, sizeof(centerAlign), "Center align");
+    
+    // QRコード印刷
+    printQRCode(S().settings.qrPrint.content);
+    
+    // 左寄せに戻す（ESC a 0）
+    const uint8_t leftAlign[] = {0x1B, 0x61, 0x00};
+    _sendBytesChecked(printerSerial_, leftAlign, sizeof(leftAlign), "Left align");
+    sendLine(""); // 空行
+  }
+  
   sendFeedLines(4);
   sendCutCommand();
   return any; // 少なくとも1行送れていなければ false
@@ -680,25 +715,107 @@ bool PrinterRenderer::printReceiptEN(const Order& order) {
     // 調整行（ちんちろ等）も印刷対象に含める
     String romaji = it.name;
     
-    // ADJUST以外はメニューからローマ字名を引く
-    if (it.kind != "ADJUST") {
+    if (it.kind == "ADJUST") {
+      // ADJUST行はローマ字に変換
+      // "Chinchiro (xxx)" の形式を保持
+      // それ以外の調整は "Adjustment" に
+      if (it.name.indexOf("Chinchiro") >= 0) {
+        // 既に "Chinchiro (ピンゾロ)" の形式なのでそのまま使用（ASCII部分のみ）
+        romaji = toASCII(it.name);
+      } else if (it.name.indexOf("ちんちろ") >= 0) {
+        romaji = "Chinchiro Adj";
+      } else {
+        romaji = "Adjustment";
+      }
+    } else {
+      // 通常商品はメニューからローマ字名を引く
       for (const auto& m : S().menu) {
         if (m.sku == it.sku || m.name == it.name) { romaji = m.nameRomaji; break; }
       }
     }
 
-    int unit = (it.unitPriceApplied > 0) ? it.unitPriceApplied : it.unitPrice;
+    // 価格計算（負の値も正しく処理）
+    int unit = (it.unitPriceApplied != 0) ? it.unitPriceApplied : it.unitPrice;
     int qty  = it.qty > 0 ? it.qty : 1;
     int sub  = unit * qty - (it.discountValue > 0 ? it.discountValue : 0);
 
     od.itemsRomaji.push_back(romaji);
     od.quantities.push_back(qty);
-    od.prices.push_back(unit);
+    od.prices.push_back(unit); // unitPriceは負の値も含む
     total += sub;
   }
   od.totalAmount = total;
 
   return printReceiptEN(od); // 既存 PrintOrderData 版へ
+}
+
+// =============================================================================
+// QRコード印刷（ESC/POS QRコードコマンド）
+// =============================================================================
+bool PrinterRenderer::printQRCode(const String& content) {
+  if (!isReady()) {
+    Serial.println("[PRINT] QR NG: not initialized");
+    return false;
+  }
+  
+  if (content.length() == 0) {
+    Serial.println("[PRINT] QR: empty content, skip");
+    return true;
+  }
+  
+  Serial.printf("[PRINT] QR: printing \"%s\" (len=%d)\n", content.c_str(), content.length());
+  
+  // ESC/POS QRコードコマンドシーケンス
+  // GS ( k <Function 165> - QRコード印刷（モデル2）
+  
+  // 1. QRコードモデル設定 (Model 2)
+  // GS ( k pL pH cn fn n1 n2
+  // cn=49, fn=65, n1=n2=0 (Model 2)
+  const uint8_t setModel[] = {0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00};
+  _sendBytesChecked(printerSerial_, setModel, sizeof(setModel), "QR Model");
+  
+  // 2. QRコードサイズ設定（セルサイズ）
+  // GS ( k pL pH cn fn n
+  // cn=49, fn=67, n=3–8 (ドット数)
+  const uint8_t setSize[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, 0x05}; // size=5
+  _sendBytesChecked(printerSerial_, setSize, sizeof(setSize), "QR Size");
+  
+  // 3. QRコード誤り訂正レベル設定
+  // GS ( k pL pH cn fn n
+  // cn=49, fn=69, n=48(L), 49(M), 50(Q), 51(H)
+  const uint8_t setECC[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, 0x31}; // level M
+  _sendBytesChecked(printerSerial_, setECC, sizeof(setECC), "QR ECC");
+  
+  // 4. QRコードデータ格納
+  // GS ( k pL pH cn fn m [data]
+  // cn=49, fn=80, m=48
+  int dataLen = content.length() + 3; // +3 for cn fn m
+  uint8_t pL = dataLen & 0xFF;
+  uint8_t pH = (dataLen >> 8) & 0xFF;
+  
+  printerSerial_->write(0x1D);
+  printerSerial_->write(0x28);
+  printerSerial_->write(0x6B);
+  printerSerial_->write(pL);
+  printerSerial_->write(pH);
+  printerSerial_->write(0x31); // cn
+  printerSerial_->write(0x50); // fn
+  printerSerial_->write(0x30); // m
+  printerSerial_->write((const uint8_t*)content.c_str(), content.length());
+  printerSerial_->flush();
+  Serial.printf("[PRINT][SEND] QR Data wrote %d bytes\n", content.length() + 8);
+  delay(50);
+  
+  // 5. QRコード印刷実行
+  // GS ( k pL pH cn fn m
+  // cn=49, fn=81, m=48
+  const uint8_t printQR[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30};
+  _sendBytesChecked(printerSerial_, printQR, sizeof(printQR), "QR Print");
+  
+  delay(100); // QR印刷待機
+  
+  Serial.println("[PRINT] QR: print command sent");
+  return true;
 }
 
 // =============================================================================

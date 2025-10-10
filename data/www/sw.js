@@ -1,6 +1,6 @@
 // KDS Service Worker - PWA オフライン対応
 
-const CACHE_NAME = 'kds-v5';
+const CACHE_NAME = 'kds-v7';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

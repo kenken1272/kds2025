@@ -116,6 +116,8 @@ bool snapshotSave() {
     doc["settings"]["store"]["name"] = S().settings.store.name;
     doc["settings"]["store"]["nameRomaji"] = S().settings.store.nameRomaji;
     doc["settings"]["store"]["registerId"] = S().settings.store.registerId;
+    doc["settings"]["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
+    doc["settings"]["qrPrint"]["content"] = S().settings.qrPrint.content;
     
     // Session
     doc["session"]["sessionId"] = S().session.sessionId;
@@ -254,6 +256,8 @@ bool snapshotLoad() {
         S().settings.store.name = doc["settings"]["store"]["name"] | "KDS BURGER";
         S().settings.store.nameRomaji = doc["settings"]["store"]["nameRomaji"] | "KDS BURGER";
         S().settings.store.registerId = doc["settings"]["store"]["registerId"] | "REG-01";
+        S().settings.qrPrint.enabled = doc["settings"]["qrPrint"]["enabled"] | false;
+        S().settings.qrPrint.content = doc["settings"]["qrPrint"]["content"] | "";
     }
     
     if (doc["session"].is<JsonObject>()) {

@@ -53,6 +53,9 @@ public:
   bool printSelfCheck();
   bool printSelfCheckEscStar();       // ESC * で真っ黒バー
 
+  // QRコード印刷（ESC/POS QRコマンド）
+  bool printQRCode(const String& content);
+
 private:
   // --- ハード仕様 ---
   static constexpr int DOT_WIDTH     = 384; // 58mm 幅（ドット）

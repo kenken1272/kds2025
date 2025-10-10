@@ -39,6 +39,8 @@ void initHttpRoutes(AsyncWebServer &server) {
     doc["settings"]["numbering"]["min"] = S().settings.numbering.min;
     doc["settings"]["numbering"]["max"] = S().settings.numbering.max;
     doc["settings"]["presaleEnabled"] = S().settings.presaleEnabled;
+    doc["settings"]["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
+    doc["settings"]["qrPrint"]["content"] = S().settings.qrPrint.content;
 
     // session
     doc["session"]["sessionId"] = S().session.sessionId;
@@ -213,6 +215,31 @@ void initHttpRoutes(AsyncWebServer &server) {
           S().settings.chinchiro.multipliers.push_back(v.as<float>());
         }
       }
+
+      walAppend("SETTINGS_UPDATE," + String(millis()));
+      snapshotSave();
+
+      JsonDocument sync; sync["type"] = "sync.snapshot";
+      String msg; serializeJson(sync, msg); wsBroadcast(msg);
+
+      request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+  // /api/settings/qrprint
+  server.on("/api/settings/qrprint", HTTP_POST, [](AsyncWebServerRequest *request){},
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
+      JsonDocument doc;
+      if (deserializeJson(doc, (char*)data, len)) {
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+      }
+
+      S().settings.qrPrint.enabled = doc["enabled"] | S().settings.qrPrint.enabled;
+      S().settings.qrPrint.content = doc["content"] | S().settings.qrPrint.content;
+
+      Serial.printf("QR Print設定更新: enabled=%d, content=%s\n", 
+                    S().settings.qrPrint.enabled, S().settings.qrPrint.content.c_str());
 
       walAppend("SETTINGS_UPDATE," + String(millis()));
       snapshotSave();
