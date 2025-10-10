@@ -613,13 +613,13 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "text/html; charset=UTF-8", html);
   });
 
-  // ボーレート変更 (default=9600 へ統一)
+  // ボーレート変更 (default=115200 へ統一)
   server.on("/api/print/baud", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println("[API] GET /api/print/baud");
-    String b = request->hasParam("b") ? request->getParam("b")->value() : "9600"; // unified default
+    String b = request->hasParam("b") ? request->getParam("b")->value() : "115200"; // unified default
     int baud = b.toInt();
-    if (baud != 9600 && baud != 19200) {
-      request->send(400, "application/json", "{\"ok\":false,\"error\":\"サポートされていないボーレートです (9600|19200)\"}");
+    if (baud != 115200 && baud != 19200) {
+      request->send(400, "application/json", "{\"ok\":false,\"error\":\"サポートされていないボーレートです (115200|19200)\"}");
       return;
     }
     if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
@@ -678,7 +678,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       "<style>body{font-family:system-ui,Arial;margin:24px;}button{font-size:18px;padding:12px 20px;}#log{margin-top:16px;white-space:pre-wrap;border:1px solid #ccc;padding:12px;border-radius:8px;}a{color:#06c;text-decoration:none;}a:hover{text-decoration:underline;}</style>"
       "</head><body>"
       "<h1>Printer Hello Test</h1>"
-      "<p>HELLO WORLD を印刷して疎通確認します。<br>電源(12V/2.5A)・配線(RX=G23,TX=G33)・9600bps を確認してから押してください。</p>"
+      "<p>HELLO WORLD を印刷して疎通確認します。<br>電源(12V/2.5A)・配線(RX=G23,TX=G33)・115200bps を確認してから押してください。</p>"
       "<button id='btn'>Print HELLO</button> <a href='/'>&larr; Home</a>"
       "<div id='log'></div>"
       "<script>const btn=document.getElementById('btn');const log=document.getElementById('log');btn.onclick=async()=>{btn.disabled=true;log.textContent='Requesting /api/print/hello ...\\n';try{const r=await fetch('/api/print/hello');const t=await r.text();log.textContent+='HTTP '+r.status+'\\n'+t;}catch(e){log.textContent+='ERROR: '+e;}btn.disabled=false;};</script>"

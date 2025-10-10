@@ -55,10 +55,11 @@ bool PrinterRenderer::initialize(HardwareSerial* serial) {
     Serial.println("[PRINT] Error: Invalid printer serial");
     return false;
   }
-  // Default baud unified to 9600bps (ESP32 RX=23, TX=33)
-  baud_  = 9600;
+  // Default baud unified to 115200bps (ESP32 RX=23, TX=33)
+  baud_  = 115200;
+  printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
   ready_ = true;
-  Serial.println("[PRINT] PrinterRenderer initialized (default 9600bps, ESP32 RX=23, TX=33)");
+  Serial.printf("[PRINT] PrinterRenderer initialized (115200bps, RX=%d, TX=%d)\n", PRN_RX, PRN_TX);
   return true;
 }
 
@@ -230,12 +231,7 @@ bool PrinterRenderer::sendSpriteAsRaster(M5Canvas& sp) {
   return true;
 }
 
-// （メモ）以前は free 関数 _sendAndDelete で private メソッド sendSpriteAsRaster を呼んでいたが
-// アクセス制御で IntelliSense 警告 (C/C++(265)) が出るため、利用箇所毎にラムダを定義する方式へ変更。
 
-// =============================================================================
-// usedHeight 付き：下端トリム送信
-// =============================================================================
 bool PrinterRenderer::printSelfCheck() {
   if (!isReady()) return false;
 
@@ -619,8 +615,7 @@ bool PrinterRenderer::printSelfCheckEscStar() {
   return true;
 }
 
-// =============================================================================
-// 英語レシート（テキスト直送）
+
 // =============================================================================
 bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
   if (!isReady()) return false;

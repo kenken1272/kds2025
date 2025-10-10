@@ -714,7 +714,7 @@ function renderExportPage() {
             
             <div style="margin: 20px 0; padding: 15px; border: 2px solid #007bff; border-radius: 5px;">
                 <h4>🖨️ ATOM Printerキット - 記事仕様テスト</h4>
-                <p>Scrapbox記事に基づくATOM Printerキットの印刷テスト。TX=22,RX=19,9600bpsで動作します。</p>
+                <p>Scrapbox記事に基づくATOM Printerキットの印刷テスト。TX=22,RX=19,115200bpsで動作します。</p>
                 <button class="btn" style="background: #007bff; color: white; margin-right: 10px;" onclick="testNewPrintSystem()">🖨️ 新システム(記事仕様)</button>
                 <button class="btn" style="background: #28a745; color: white; margin-right: 10px;" onclick="testPrintSelfCheck()">🔍 接続診断</button>
                 <button class="btn" style="background: #ffc107; color: black;" onclick="testJapanesePrint()">🖨️ 確実印刷テスト</button>

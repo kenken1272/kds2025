@@ -65,7 +65,7 @@ private:
 
   HardwareSerial* printerSerial_ = nullptr;
   bool ready_ = false;
-  int  baud_  = 9600; // Unified default baud (M5 ATOM Printer spec) – do not change silently
+  int  baud_  = 115200; // Unified default baud (M5 ATOM Printer spec) – do not change silently
 
   // ---- 内部ユーティリティ ----
   // ASCIIのみに整形（0x20–0x7E以外を'?'へ）
