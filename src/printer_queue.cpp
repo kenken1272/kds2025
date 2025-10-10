@@ -22,15 +22,17 @@ String formatOrderTicket(const Order& order) {
     // Optimized for thermal printer stability
     
     // Header: Store name and order number (English)
-    ticket += "\x1B\x61\x01"; // Center align
+    // 注意: String にバイナリ制御コード(0x00含む)を直接埋めない方針。
+    // ここでは可視ASCIIのみを構築し、制御系(改行/カット)は PrinterRenderer 側APIで実行する。
+    // （旧実装での "\x1B\x61\x01" などは削除）
     ticket += S().settings.store.nameRomaji + "\n";
     ticket += "========================\n";
     
     // Display order number in large size
-    ticket += "\x1D\x21\x22"; // Double width/height
+    // (旧) 文字拡大 ESC/POS シーケンス禁止: Stringにバイナリを入れない
+    // ここでの装飾は将来 PrinterRenderer に委譲する
     ticket += "Order No: " + order.orderNo + "\n";
-    ticket += "\x1D\x21\x00"; // Return to normal size
-    ticket += "\x1B\x61\x00"; // Return to left align
+    // (旧) 戻しコマンド削除
     
     // Display order time (current time - more reliable)
     String currentTime = isTimeValid() ? getCurrentDateTime() : "Time not synced";
@@ -86,22 +88,20 @@ String formatOrderTicket(const Order& order) {
     
     // Total amount (English, bold)
     ticket += "------------------------\n";
-    ticket += "\x1B\x45\x01"; // Bold start
+    // (旧) Bold開始/終了削除
     ticket += "TOTAL: " + String(total) + " YEN";
-    ticket += "\x1B\x45\x00"; // Bold end
     ticket += "\n";
     
     ticket += "========================\n";
     
     // Footer (English)
-    ticket += "\x1B\x61\x01"; // Center align
+    // (旧) 中央寄せESC削除 – Web側表示のみ
     ticket += "Thank you!\n";
     ticket += S().settings.store.nameRomaji + "\n";
-    ticket += "\x1B\x61\x00"; // Return to left align
+    // (旧) 左寄せ戻し削除
     
     // Margin and cut
-    ticket += "\n\n\n";
-    ticket += "\x1D\x56\x00"; // Full cut
+    ticket += "\n"; // 単純改行のみ。フィード/カットは送信時に renderer が行う
     
     return ticket;
 }

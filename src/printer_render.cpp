@@ -16,7 +16,17 @@ static void _hexDump(const uint8_t* p, size_t n, const char* tag) {
 }
 
 static void _sendBytesDebug(HardwareSerial* ser, const uint8_t* p, size_t n, const char* tag){
-  if (!ser) return; _hexDump(p,n,tag); ser->write(p,n); ser->flush(); Serial.printf("[PRINT][SEND] wrote %u bytes for %s\n", (unsigned)n, tag?tag:"?"); delay(10); }
+  if (!ser) return; _hexDump(p,n,tag); size_t w = ser->write(p,n); ser->flush(); Serial.printf("[PRINT][SEND](debug) %s wrote %u/%u bytes\n", tag?tag:"?", (unsigned)w,(unsigned)n); delay(10); }
+
+// 成功判定付き送信（本タスク追加）
+static bool _sendBytesChecked(HardwareSerial* ser, const uint8_t* p, size_t n, const char* tag) {
+  if (!ser || !p || !n) return false;
+  size_t w = ser->write(p, n);
+  ser->flush();
+  Serial.printf("[PRINT][SEND] %s wrote %u/%u bytes\n", tag?tag:"?", (unsigned)w, (unsigned)n);
+  delay(10);
+  return (w == n);
+}
 
 static void _sendLineASCII(HardwareSerial* ser, const String& s){
   if (!ser) return; String t = s; for (int i=0;i<t.length();++i){ char c=t[i]; if (c<0x20||c>0x7E) t.setCharAt(i,'?'); }
@@ -45,10 +55,10 @@ bool PrinterRenderer::initialize(HardwareSerial* serial) {
     Serial.println("[PRINT] Error: Invalid printer serial");
     return false;
   }
-  // Default baud per M5 ATOM Printer spec is 9600bps
-  baud_  = 9600;   // was 19200
+  // Default baud unified to 9600bps (ESP32 RX=23, TX=33)
+  baud_  = 9600;
   ready_ = true;
-  Serial.println("[PRINT] PrinterRenderer initialized (default 9600bps)");
+  Serial.println("[PRINT] PrinterRenderer initialized (default 9600bps, ESP32 RX=23, TX=33)");
   return true;
 }
 
@@ -68,8 +78,8 @@ void PrinterRenderer::printerInit() {
     return;
   }
 
-  Serial.printf("[PRINT] ATOM Printer init @ %dbps (EN/ASCII)\n", baud_);
-  // UARTをここで開始（ピンは ATOM Printer 既定）
+  Serial.printf("[PRINT] ATOM Printer init @ %dbps (ESP32 RX=%d, TX=%d)\n", baud_, PRN_RX, PRN_TX);
+  // begin(baud,config,RX,TX) 順序注意
   printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
 
   delay(200);
@@ -81,17 +91,10 @@ void PrinterRenderer::printerInit() {
   const uint8_t ESC_T_437[]  = {0x1B, 0x74, 0x00};         // コードページ=PC437
   const uint8_t ESC_3_LS[]   = {0x1B, 0x33, (uint8_t)LINE_SPACING}; // 行間
 
-  auto send = [&](const uint8_t* d, size_t n, const char* label){
-    printerSerial_->write(d, n);
-    printerSerial_->flush();
-    delay(10);
-    Serial.printf("[PRINT] %s\n", label);
-  };
-
-  send(ESC_AT,    sizeof(ESC_AT),    "ESC @ (reset)");
-  send(ESC_R_USA, sizeof(ESC_R_USA), "ESC R 0 (USA)");
-  send(ESC_T_437, sizeof(ESC_T_437), "ESC t 0 (PC437)");
-  send(ESC_3_LS,  sizeof(ESC_3_LS),  "ESC 3 line spacing");
+  _sendBytesChecked(printerSerial_, ESC_AT,    sizeof(ESC_AT),    "ESC @ (reset)");
+  _sendBytesChecked(printerSerial_, ESC_R_USA, sizeof(ESC_R_USA), "ESC R 0 (USA)");
+  _sendBytesChecked(printerSerial_, ESC_T_437, sizeof(ESC_T_437), "ESC t 0 (PC437)");
+  _sendBytesChecked(printerSerial_, ESC_3_LS,  sizeof(ESC_3_LS),  "ESC 3 line spacing");
 
   Serial.println("[PRINT] Initialization completed");
 }
@@ -112,26 +115,21 @@ void PrinterRenderer::updateBaudRate(int baudRate) {
 
 void PrinterRenderer::sendFeedLines(int lines) {
   if (!isReady() || lines <= 0) return;
-  // ESC d n : n行送り
   while (lines > 0) {
     uint8_t chunk = (uint8_t)min(lines, 255);
-    const uint8_t feed[] = {0x1B, 0x64, chunk};
-    printerSerial_->write(feed, sizeof(feed));
-    printerSerial_->flush();
-    // 目安ウェイト（HowTo推奨: 1行 ≈ 80ms）
-    delay(80 * chunk);
+    const uint8_t feed[] = {0x1B, 0x64, chunk}; // ESC d n
+    _sendBytesChecked(printerSerial_, feed, sizeof(feed), "ESC d n");
+    delay(80 * chunk); // 推奨：1行 ~80ms
     lines -= chunk;
   }
 }
 
 void PrinterRenderer::sendCutCommand() {
   if (!isReady()) return;
-  // 58mm 手動カット機が多いので、紙送り+カットコマンド（無視されてもOK）
   sendFeedLines(4);
-  const uint8_t cut[] = {0x1D, 0x56, 0x42, 0x00}; // GS V B
-  printerSerial_->write(cut, sizeof(cut));
-  printerSerial_->flush();
-  Serial.println("[PRINT] Cut command sent");
+  const uint8_t cut[] = {0x1D, 0x56, 0x42, 0x00}; // GS V B m=0x00 full cut
+  _sendBytesChecked(printerSerial_, cut, sizeof(cut), "GS V B 0");
+  Serial.println("[PRINT] Cut command issued");
 }
 
 // =============================================================================
@@ -489,23 +487,24 @@ bool PrinterRenderer::printReceiptJP(const Order& order) {
 // =============================================================================
 bool PrinterRenderer::printEnglishTest() {
   if (!isReady()) return false;
-
   printerInit();
-  writeLineASCII("==============================");
-  writeLineASCII(" Kyudai Cooking Club - KyuShoku");
-  writeLineASCII("==============================");
-  writeLineASCII("");
-  writeLineASCII("Order No. 55");
-  writeLineASCII("------------------------------");
-  writeLineASCII("Teriyaki Burger      x1  800");
-  writeLineASCII("Kyushoku Burger      x1  700");
-  writeLineASCII("------------------------------");
-  writeLineASCII("Total:                  1500");
-  writeLineASCII(isTimeValid() ? getCurrentDateTime() : "Time not synced");
-  writeLineASCII("Thank you!");
+  bool any=false;
+  auto sendStr=[&](const String& s){ String line=toASCII(s)+"\n"; bool ok=_sendBytesChecked(printerSerial_, (const uint8_t*)line.c_str(), line.length(), "LINE"); any = any || ok; };
+  sendStr("==============================");
+  sendStr(" Kyudai Cooking Club - KyuShoku");
+  sendStr("==============================");
+  sendStr("");
+  sendStr("Order No. 55");
+  sendStr("------------------------------");
+  sendStr("Teriyaki Burger      x1  800");
+  sendStr("Kyushoku Burger      x1  700");
+  sendStr("------------------------------");
+  sendStr("Total:                  1500");
+  sendStr(isTimeValid() ? getCurrentDateTime() : "Time not synced");
+  sendStr("Thank you!");
   sendFeedLines(4);
   sendCutCommand();
-  return true;
+  return any; // 1行も成功していなければ false
 }
 
 bool PrinterRenderer::printJapaneseTest() {
@@ -626,33 +625,30 @@ bool PrinterRenderer::printSelfCheckEscStar() {
 bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
   if (!isReady()) return false;
   printerInit();
-
-  writeLineASCII("==============================");
-  writeLineASCII(toASCII(od.storeName));
-  writeLineASCII("==============================");
-  writeLineASCII("");
-  writeLineASCII("Order No. " + toASCII(od.orderNo));
-  writeLineASCII("------------------------------");
-
+  bool any=false;
+  auto sendLine=[&](const String& s){ String line=toASCII(s)+"\n"; bool ok=_sendBytesChecked(printerSerial_, (const uint8_t*)line.c_str(), line.length(), "LINE"); any = any || ok; };
+  sendLine("==============================");
+  sendLine(toASCII(od.storeName));
+  sendLine("==============================");
+  sendLine("");
+  sendLine("Order No. " + toASCII(od.orderNo));
+  sendLine("------------------------------");
   const size_t n = od.itemsRomaji.size();
   for (size_t i=0; i<n; ++i) {
     String name = (i < od.itemsRomaji.size()) ? od.itemsRomaji[i] : String("-");
     int qty     = (i < od.quantities.size())  ? od.quantities[i]  : 1;
     int unit    = (i < od.prices.size())      ? od.prices[i]      : 0;
-
-    // 左:名前 / 右:数量と単価（簡易）
     if (name.length() > 24) name = name.substring(0, 24);
-    writeLineASCII(toASCII(name));
-    writeLineASCII("  x" + String(qty) + "   " + String(unit) + "yen");
+    sendLine(name);
+    sendLine("  x" + String(qty) + "   " + String(unit) + "yen");
   }
-
-  writeLineASCII("------------------------------");
-  writeLineASCII("Total: " + String(od.totalAmount) + " yen");
-  writeLineASCII(isTimeValid() ? getCurrentDateTime() : "Time not synced");
-  writeLineASCII(toASCII(od.footerMessage));
+  sendLine("------------------------------");
+  sendLine("Total: " + String(od.totalAmount) + " yen");
+  sendLine(isTimeValid() ? getCurrentDateTime() : "Time not synced");
+  sendLine(toASCII(od.footerMessage));
   sendFeedLines(4);
   sendCutCommand();
-  return true;
+  return any; // 少なくとも1行送れていなければ false
 }
 
 // Order から英語レシート用 PrintOrderData を生成して既存実装へ委譲
@@ -694,35 +690,17 @@ bool PrinterRenderer::printReceiptEN(const Order& order) {
 // =============================================================================
 bool PrinterRenderer::printHelloWorldTest() {
   if (!isReady()) { Serial.println("[PRINT] NG: not initialized"); return false; }
-
   Serial.println("========== HELLO TEST START ==========");
-  Serial.printf("[PRINT] UART: %d bps, RX=%d, TX=%d\n", baud_, PRN_RX, PRN_TX);
-  // 冪等初期化（低レイヤコマンドを直接送る：printerInitに似るがHEXダンプ目的で個別送信）
-  printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
-  delay(50);
-  while (printerSerial_->available()) printerSerial_->read();
-  printerSerial_->flush();
-
-  const uint8_t esc_at[]    ={0x1B,0x40};
-  const uint8_t esc_r0[]    ={0x1B,0x52,0x00};
-  const uint8_t esc_t0[]    ={0x1B,0x74,0x00};
-  const uint8_t esc_align0[]={0x1B,0x61,0x00};
-  const uint8_t esc_3[]     ={0x1B,0x33,(uint8_t)LINE_SPACING};
-  _sendBytesDebug(printerSerial_, esc_at,    sizeof(esc_at),    "ESC @ (reset)");
-  _sendBytesDebug(printerSerial_, esc_r0,    sizeof(esc_r0),    "ESC R 0 (USA)");
-  _sendBytesDebug(printerSerial_, esc_t0,    sizeof(esc_t0),    "ESC t 0 (PC437)");
-  _sendBytesDebug(printerSerial_, esc_align0,sizeof(esc_align0),"ESC a 0 (left)");
-  _sendBytesDebug(printerSerial_, esc_3,     sizeof(esc_3),     "ESC 3 line spacing");
-
-  // 印字本体（ASCIIガード付き）
-  _sendLineASCII(printerSerial_, "HELLO WORLD");
-  _sendLineASCII(printerSerial_, "hallo warld");
-  _sendLineASCII(printerSerial_, "1234567890 !@#$%^&*()-_=+");
-  _sendLineASCII(printerSerial_, "If you can read this, UART OK.");
-
-  // フィード + カット
+  Serial.printf("[PRINT] UART: %d bps (ESP32 RX=%d, TX=%d)\n", baud_, PRN_RX, PRN_TX);
+  printerInit(); // 既定初期化（再begin含む）
+  bool any=false;
+  auto sendAscii=[&](const char* s){ String line=String(s)+"\n"; bool ok=_sendBytesChecked(printerSerial_, (const uint8_t*)line.c_str(), line.length(), "HELLO"); any = any || ok; };
+  sendAscii("HELLO WORLD");
+  sendAscii("hallo warld");
+  sendAscii("1234567890 !@#$%^&*()-_+=");
+  sendAscii("If you can read this, UART OK.");
   sendFeedLines(4);
   sendCutCommand();
   Serial.println("=========== HELLO TEST END ===========");
-  return true;
+  return any;
 }

@@ -5,20 +5,6 @@
 #include <M5Unified.h>
 #include <vector>
 #include "store.h"
-
-/**
- * ATOM Printer（58mm/384dot）用 レシート描画/送信クラス
- *
- * 方針：
- *  - 英語（英数字のみ）… テキスト直送（コードページ：PC437、国際文字：USA）
- *  - 日本語 … ビットマップ（ラスタ）印字で送信（コードページ非依存）
- *
- * 文字化け対策の要点：
- *  - 初期化時に ESC @ → ESC R 0（USA）→ ESC t 0（PC437）を必ず送る
- *  - 英語テキスト直送前に ASCII ガード（0x20–0x7E 以外は '?' に置換）
- *  - 日本語は M5Canvas で描画したビットマップを GS v 0 のラスタで送る
- */
-
 // 注文データ
 struct PrintOrderData {
   String orderNo;                    // 注文番号（例: "0055"）
@@ -73,14 +59,13 @@ private:
   static constexpr int RASTER_HEIGHT = 24;  // GS v 0 の高さ単位（24ドット推奨）
   static constexpr int LINE_SPACING  = 24;  // ESC 3 の行間（ドット）
 
-  // ATOM Printer official pin map:
-  //  Printer TX -> ESP32 G23 (RX), Printer RX <- ESP32 G33 (TX)
-  static constexpr int PRN_RX = 23; // was 19
-  static constexpr int PRN_TX = 33; // was 22
+
+  static constexpr int PRN_RX = 33; 
+  static constexpr int PRN_TX = 23; 
 
   HardwareSerial* printerSerial_ = nullptr;
   bool ready_ = false;
-  int  baud_  = 19200;
+  int  baud_  = 9600; // Unified default baud (M5 ATOM Printer spec) – do not change silently
 
   // ---- 内部ユーティリティ ----
   // ASCIIのみに整形（0x20–0x7E以外を'?'へ）

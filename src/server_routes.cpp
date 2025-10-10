@@ -613,34 +613,10 @@ void initHttpRoutes(AsyncWebServer &server) {
     request->send(200, "text/html; charset=UTF-8", html);
   });
 
-  // 総合テスト（printerInit + サンプル印字＝日本語ビットマップ）
-  server.on("/api/print/test", HTTP_GET, [](AsyncWebServerRequest *request) {
-    Serial.println("[API] GET /api/print/test");
-    if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
-    bool ok = g_printerRenderer.printJapaneseTest();
-    request->send(ok?200:500, "application/json", ok? "{\"ok\":true,\"message\":\"Japanese test printing completed\"}":"{\"ok\":false,\"error\":\"Test printing failed\"}");
-  });
-
-  // 自己診断
-  server.on("/api/print/selfcheck", HTTP_GET, [](AsyncWebServerRequest *request) {
-    Serial.println("[API] GET /api/print/selfcheck");
-    if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
-    bool ok = g_printerRenderer.printSelfCheck();
-    request->send(ok?200:500, "application/json", ok? "{\"ok\":true,\"message\":\"Self-check completed\"}":"{\"ok\":false,\"error\":\"Self-check failed\"}");
-  });
-
-  // ESC * 専用黒バー
-  server.on("/api/print/selfcheck-escstar", HTTP_GET, [](AsyncWebServerRequest *request) {
-    Serial.println("[API] GET /api/print/selfcheck-escstar");
-    if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
-    bool ok = g_printerRenderer.printSelfCheckEscStar();
-    request->send(ok?200:500, "application/json", ok? "{\"ok\":true}":"{\"ok\":false}");
-  });
-
-  // ボーレート変更
+  // ボーレート変更 (default=9600 へ統一)
   server.on("/api/print/baud", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println("[API] GET /api/print/baud");
-    String b = request->hasParam("b") ? request->getParam("b")->value() : "19200";
+    String b = request->hasParam("b") ? request->getParam("b")->value() : "9600"; // unified default
     int baud = b.toInt();
     if (baud != 9600 && baud != 19200) {
       request->send(400, "application/json", "{\"ok\":false,\"error\":\"サポートされていないボーレートです (9600|19200)\"}");
@@ -651,6 +627,17 @@ void initHttpRoutes(AsyncWebServer &server) {
     String msg = "{\"ok\":true,\"baud\":" + String(baud) + "}";
     request->send(200, "application/json", msg);
   });
+
+  // TODO: 将来 DLE EOT ステータス要求 (0x10 0x04 n) を実装し /api/printer/status-raw 等で返却
+
+  // ESC * 専用黒バー
+  server.on("/api/print/selfcheck-escstar", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Serial.println("[API] GET /api/print/selfcheck-escstar");
+    if (!g_printerRenderer.isReady()) { request->send(500, "application/json", "{\"ok\":false,\"error\":\"Printer not initialized\"}"); return; }
+    bool ok = g_printerRenderer.printSelfCheckEscStar();
+    request->send(ok?200:500, "application/json", ok? "{\"ok\":true}":"{\"ok\":false}");
+  });
+
 
   // 日本語直接印刷テスト
   server.on("/api/print/test-japanese", HTTP_GET, [](AsyncWebServerRequest *request) {
