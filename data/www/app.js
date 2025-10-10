@@ -7,7 +7,8 @@ const state = {
     online: false,
     data: null, // API state cache
     cart: [], // 注文カート
-    settingsTab: 'main' // 設定タブ (main|side|system|chinchiro)
+    settingsTab: 'main', // 設定タブ (main|side|system|chinchiro)
+    callList: [] // 呼び出し中の注文番号リスト [{orderNo, ts}]
 };
 
 // DOM要素
@@ -30,20 +31,25 @@ document.addEventListener('DOMContentLoaded', () => {
     // ナビゲーション設定
     setupNavigation();
     
+    // 時刻同期を最優先で実行（データ取得前）
+    syncTimeOnce().then(() => {
+        console.log('初期時刻同期完了 - データ取得開始');
+        // 初期データ取得
+        loadStateData();
+    }).catch(err => {
+        console.error('初期時刻同期失敗:', err);
+        // 失敗してもデータは取得
+        loadStateData();
+    });
+    
+    // 定期的な時刻同期（5分毎に変更 - より頻繁に）
+    setInterval(syncTimeOnce, 5 * 60 * 1000);
+    
     // WebSocket接続
     connectWs();
     
     // 再接続ボタン
     reconnectBtn.addEventListener('click', connectWs);
-    
-    // 初期データ取得
-    loadStateData();
-    
-    // 時刻同期（起動時に1回）
-    syncTimeOnce();
-    
-    // 定期的な時刻同期（30分毎）
-    setInterval(syncTimeOnce, 30 * 60 * 1000);
     
     // グローバルエラーハンドリング設定
     window.addEventListener("error", e => console.error("GLOBAL ERR", e.error || e.message));
@@ -67,7 +73,51 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 初期ページ表示
     render();
+    
+    // 現在時刻の定期更新（1秒毎）
+    updateCurrentTime();
+    setInterval(updateCurrentTime, 1000);
+    
+    // 呼び出しリストの定期更新（10秒毎）
+    setInterval(() => {
+        if (state.page === 'call') {
+            loadCallList();
+        }
+    }, 10000);
+    
+    // 初回呼び出しリスト取得
+    loadCallList();
 });
+
+// 現在時刻表示更新
+function updateCurrentTime() {
+    // ヘッダーの時刻表示（注文画面など）
+    const timeDiv = document.getElementById('current-time');
+    if (timeDiv) {
+        const now = new Date();
+        timeDiv.textContent = now.toLocaleString('ja-JP', { 
+            timeZone: 'Asia/Tokyo',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    }
+    
+    // 呼び出し画面の時刻表示（左下小さく）
+    const callTimeDiv = document.querySelector('.call-time');
+    if (callTimeDiv) {
+        const now = new Date();
+        callTimeDiv.textContent = now.toLocaleString('ja-JP', { 
+            timeZone: 'Asia/Tokyo',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    }
+}
 
 // データ取得
 async function loadStateData() {
@@ -76,6 +126,7 @@ async function loadStateData() {
         state.data = await response.json();
         console.log('状態データ取得完了:', state.data);
         render(); // 再描画
+        updateConfirmOrderButton();
     } catch (error) {
         console.error('状態データ取得エラー:', error);
     }
@@ -123,7 +174,13 @@ function setupNavigation() {
                 
                 // ページ切り替え
                 state.page = page;
-                render();
+                
+                // 呼び出し画面に切り替える場合は最新データを取得
+                if (page === 'call') {
+                    loadCallList().then(() => render());
+                } else {
+                    render();
+                }
             }
         });
     });
@@ -176,6 +233,33 @@ function connectWs() {
                     state.data.printer.paperOut = data.paperOut !== undefined ? data.paperOut : state.data.printer.paperOut;
                     state.data.printer.holdJobs = data.holdJobs !== undefined ? data.holdJobs : state.data.printer.holdJobs;
                     render();
+                    updateConfirmOrderButton();
+                }
+            } else if (data.type === 'order.cooked') {
+                // 調理済み→呼び出しリストに追加
+                const exists = state.callList.find(item => item.orderNo === data.orderNo);
+                if (!exists) {
+                    state.callList.push({ orderNo: data.orderNo, ts: Date.now() / 1000 });
+                    console.log('呼び出しリストに追加:', data.orderNo);
+                }
+                // 呼び出し画面のみスムーズに更新
+                if (state.page === 'call') {
+                    updateCallScreen();
+                } else {
+                    loadStateData(); // 他の画面は通常更新
+                }
+            } else if (data.type === 'order.picked') {
+                // 品出し済み→呼び出しリストから削除
+                const beforeLength = state.callList.length;
+                state.callList = state.callList.filter(item => item.orderNo !== data.orderNo);
+                if (beforeLength !== state.callList.length) {
+                    console.log('呼び出しリストから削除:', data.orderNo);
+                }
+                // 呼び出し画面のみスムーズに更新
+                if (state.page === 'call') {
+                    updateCallScreen();
+                } else {
+                    loadStateData(); // 他の画面は通常更新
                 }
             }
             
@@ -249,6 +333,9 @@ function render() {
         case 'export':
             content = renderExportPage();
             break;
+        case 'call':
+            content = renderCallPage();
+            break;
         default:
             content = '<div class="card"><h2>ページが見つかりません</h2></div>';
     }
@@ -298,20 +385,47 @@ function renderOrderPage() {
             <!-- メイン選択 -->
             <h3>メイン商品</h3>
             <div class="grid">
-                ${mainItems.map(item => `
+                ${mainItems.map(item => {
+                    const normalPrice = item.price_normal;
+                    const presalePrice = item.price_normal + item.presale_discount_amount;
+                    const hasPresale = state.data.settings.presaleEnabled && item.presale_discount_amount < 0;
+                    const hasSides = sideItems.length > 0;
+                    
+                    return `
                     <div class="card">
                         <h4>${item.name}</h4>
-                        <p>通常: ${item.price_normal}円</p>
-                        ${item.presale_discount_amount < 0 ? `<p>前売: ${item.price_normal + item.presale_discount_amount}円</p>` : ''}
-                        <button class="btn btn-primary" onclick="addToCart('SET', '${item.sku}', 'normal')" ${state.data.printer.paperOut ? 'disabled' : ''}>
-                            通常で追加
+                        <p style="margin: 5px 0;">通常: ${normalPrice}円</p>
+                        ${hasPresale ? `<p style="margin: 5px 0;">前売: ${presalePrice}円</p>` : ''}
+                        
+                        <!-- 単品ボタン -->
+                        <button class="btn btn-primary" onclick="addMainSingle('${item.sku}', 'normal')" 
+                                ${state.data.printer.paperOut ? 'disabled' : ''}
+                                style="width: 100%; margin-bottom: 5px;">
+                            通常
                         </button>
-                        ${(state.data.settings.presaleEnabled && item.presale_discount_amount < 0) ? `
-                        <button class="btn btn-success" onclick="addToCart('SET', '${item.sku}', 'presale')" ${state.data.printer.paperOut ? 'disabled' : ''}>
-                            前売で追加
+                        ${hasPresale ? `
+                        <button class="btn btn-success" onclick="addMainSingle('${item.sku}', 'presale')" 
+                                ${state.data.printer.paperOut ? 'disabled' : ''}
+                                style="width: 100%; margin-bottom: 5px;">
+                            前売り
                         </button>` : ''}
+                        
+                        <!-- セットボタン -->
+                        ${hasSides ? `
+                        <button class="btn btn-warning" onclick="showSideSelectModal('${item.sku}', 'normal')" 
+                                ${state.data.printer.paperOut ? 'disabled' : ''}
+                                style="width: 100%; margin-bottom: 5px;">
+                            セット（通常）
+                        </button>
+                        ${hasPresale ? `
+                        <button class="btn btn-info" onclick="showSideSelectModal('${item.sku}', 'presale')" 
+                                ${state.data.printer.paperOut ? 'disabled' : ''}
+                                style="width: 100%; margin-bottom: 5px;">
+                            セット（前売り）
+                        </button>` : ''}
+                        ` : '<p style="color: #999; font-size: 0.9em;">※サイド商品なし</p>'}
                     </div>
-                `).join('')}
+                `}).join('')}
             </div>
             
             <!-- サイド単品 -->
@@ -333,12 +447,20 @@ function renderOrderPage() {
                 <h3>注文カート</h3>
                 <div id="cart-items"></div>
                 <div style="margin-top: 15px;">
-                    <button class="btn btn-success btn-large" data-action="confirm-order" type="button" ${state.cart.length === 0 || state.data.printer.paperOut ? 'disabled' : ''} style="font-size: 1.5em; padding: 15px 30px; width: 100%; margin-bottom: 10px;">
+                    <button id="confirm-order-btn" class="btn btn-success btn-large" 
+                            data-action="confirm-order" 
+                            type="button" 
+                            onclick="handleConfirmOrder(event)"
+                            ${state.cart.length === 0 || state.data.printer.paperOut ? 'disabled' : ''} 
+                            style="font-size: 1.5em; padding: 15px 30px; width: 100%; margin-bottom: 10px;">
                         📝 注文確定
                     </button>
                     <button class="btn btn-secondary" onclick="clearCart()" style="width: 100%;">
                         🗑️ カートクリア
                     </button>
+                    <div style="margin-top: 10px; padding: 8px; background: #f8f9fa; border-radius: 5px; font-size: 0.85em; color: #666; text-align: center;">
+                        💡 注文確定ボタンをクリックすると即座に注文が送信されます（画面遷移不要）
+                    </div>
                 </div>
             </div>
         </div>
@@ -374,12 +496,9 @@ function renderKitchenPage() {
                             <div class="kitchen-items">
                                 ${order.items.map(item => `
                                     <div class="kitchen-item">
-                                        <div class="item-name" style="font-size: 1.1em; font-weight: bold;">${item.name}</div>
-                                        <div class="item-qty" style="font-size: 1.3em; color: #007bff; font-weight: bold;">
+                                        <div class="item-name" style="font-size: 1.2em; font-weight: bold;">${item.name}</div>
+                                        <div class="item-qty" style="font-size: 1.4em; color: #007bff; font-weight: bold;">
                                             数量: ${item.qty}個
-                                        </div>
-                                        <div class="item-price" style="font-size: 1em; color: #28a745; font-weight: bold;">
-                                            単価: ${item.unitPriceApplied || item.unitPrice || 0}円
                                         </div>
                                         ${item.priceMode === 'presale' ? '<div class="presale-badge">前売</div>' : ''}
                                     </div>
@@ -415,7 +534,12 @@ function renderPickupPage() {
     
     return `
         <div class="card">
-            <h2>品出し画面 (${pickupOrders.length}件)</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2>品出し画面 (${pickupOrders.length}件)</h2>
+                <button class="btn btn-secondary" onclick="testPickupApi()" style="font-size: 0.9em;">
+                    🔧 API接続テスト
+                </button>
+            </div>
             <div class="grid">
                 ${pickupOrders.map(order => {
                     const elapsed = order.ts && order.ts > 946684800 ? Math.floor((Date.now() / 1000 - order.ts) / 60) : 0;
@@ -430,8 +554,9 @@ function renderPickupPage() {
                     const actionText = isCooking ? '品出し完了' : '品出し完了';
                     
                     return `
-                        <div class="card order-card pickup-card" onclick="showOrderDetail('${order.orderNo}')" 
-                             style="border-left-color: ${statusColor}; background-color: #f8f9fa;">
+                        <div class="card order-card pickup-card" 
+                             data-order-no="${order.orderNo}"
+                             style="border-left-color: ${statusColor}; background-color: #f8f9fa; cursor: pointer;">
                             <div class="pickup-header">
                                 <h3># ${order.orderNo}</h3>
                                 <span class="badge" style="background-color: ${statusColor};">${statusText}</span>
@@ -442,11 +567,15 @@ function renderPickupPage() {
                             <div class="pickup-items">
                                 <strong>${itemsSummary}</strong>
                             </div>
-                            <div class="pickup-actions">
-                                <button class="btn btn-info btn-sm" onclick="event.stopPropagation(); updateOrderStatus('${order.orderNo}', 'READY')">
-                                    ✅ ${actionText}
+                            <div class="pickup-actions" style="text-align: center; margin-top: 15px;">
+                                <button class="btn btn-primary btn-large" 
+                                        onclick="showOrderDetail('${order.orderNo}')" 
+                                        style="font-size: 1.4em; padding: 15px 30px; width: 100%;">
+                                    📋 状態を変更する
                                 </button>
-                                <small style="display: block; margin-top: 5px;">クリックで詳細表示</small>
+                                <small style="display: block; margin-top: 8px; color: #666; font-size: 0.95em;">
+                                    👆 クリックして調理済み・品出し済みにできます
+                                </small>
                             </div>
                         </div>
                     `;
@@ -479,56 +608,96 @@ function renderSettingsPage() {
         const mainItems = state.data.menu.filter(item => item.category === 'MAIN');
         tabContent = `
             <div class="card">
-                <h3>メイン商品管理</h3>
-                <div id="main-items">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h3>メイン商品管理</h3>
+                    <button class="btn btn-success" onclick="addNewMainItem()">➕ 新規追加</button>
+                </div>
+                <div class="menu-items-grid" id="main-items">
                     ${mainItems.map((item, idx) => `
-                        <div style="border: 1px solid #ddd; padding: 10px; margin: 10px 0;">
-                            <input type="text" placeholder="ID" value="${item.sku}" id="main-id-${idx}" readonly style="background: #f5f5f5;">
-                            <input type="text" placeholder="商品名" value="${item.name}" id="main-name-${idx}">
-                            <input type="text" placeholder="商品名（ローマ字）" value="${item.nameRomaji || ''}" id="main-name-romaji-${idx}">
-                            <input type="number" placeholder="通常価格" value="${item.price_normal}" id="main-normal-${idx}">
-                            <input type="number" placeholder="前売割引額" value="${item.presale_discount_amount}" id="main-discount-${idx}">
-                            <label><input type="checkbox" ${item.active ? 'checked' : ''} id="main-active-${idx}"> 有効</label>
+                        <div class="menu-item-card" data-sku="${item.sku}" data-idx="${idx}">
+                            <div class="menu-item-header">
+                                <div class="drag-handle">⋮⋮</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" ${item.active ? 'checked' : ''} onchange="toggleMainItemActive('${item.sku}', this.checked)">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="menu-item-body">
+                                <div class="form-group">
+                                    <label>商品名</label>
+                                    <input type="text" class="form-control" value="${item.name}" 
+                                           onchange="updateMainItem('${item.sku}', 'name', this.value)">
+                                </div>
+                                <div class="form-group">
+                                    <label>商品名（ローマ字）</label>
+                                    <input type="text" class="form-control" value="${item.nameRomaji || ''}" 
+                                           onchange="updateMainItem('${item.sku}', 'nameRomaji', this.value)">
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>通常価格</label>
+                                        <input type="number" class="form-control" value="${item.price_normal}" 
+                                               onchange="updateMainItem('${item.sku}', 'price_normal', parseInt(this.value))">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>前売割引額</label>
+                                        <input type="number" class="form-control" value="${item.presale_discount_amount}" 
+                                               onchange="updateMainItem('${item.sku}', 'presale_discount_amount', parseInt(this.value))">
+                                    </div>
+                                </div>
+                                <small class="text-muted">SKU: ${item.sku}</small>
+                            </div>
                         </div>
                     `).join('')}
-                    <div style="border: 1px dashed #ddd; padding: 10px; margin: 10px 0;">
-                        <input type="text" placeholder="ID (自動採番)" id="main-id-new" readonly style="background: #f5f5f5;">
-                        <input type="text" placeholder="新商品名" id="main-name-new">
-                        <input type="text" placeholder="新商品名（ローマ字）" id="main-name-romaji-new">
-                        <input type="number" placeholder="通常価格" id="main-normal-new">
-                        <input type="number" placeholder="前売割引額" id="main-discount-new" value="-100">
-                        <label><input type="checkbox" checked id="main-active-new"> 有効</label>
-                    </div>
                 </div>
-                <button class="btn btn-primary" onclick="saveMainProducts()">保存</button>
             </div>
         `;
     } else if (state.settingsTab === 'side') {
         const sideItems = state.data.menu.filter(item => item.category === 'SIDE');
         tabContent = `
             <div class="card">
-                <h3>サイド商品管理</h3>
-                <div id="side-items">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h3>サイド商品管理</h3>
+                    <button class="btn btn-success" onclick="addNewSideItem()">➕ 新規追加</button>
+                </div>
+                <div class="menu-items-grid" id="side-items">
                     ${sideItems.map((item, idx) => `
-                        <div style="border: 1px solid #ddd; padding: 10px; margin: 10px 0;">
-                            <input type="text" placeholder="ID" value="${item.sku}" id="side-id-${idx}" readonly style="background: #f5f5f5;">
-                            <input type="text" placeholder="商品名" value="${item.name}" id="side-name-${idx}">
-                            <input type="text" placeholder="商品名（ローマ字）" value="${item.nameRomaji || ''}" id="side-name-romaji-${idx}">
-                            <input type="number" placeholder="単品価格" value="${item.price_single}" id="side-single-${idx}">
-                            <input type="number" placeholder="セット時価格" value="${item.price_as_side}" id="side-set-${idx}">
-                            <label><input type="checkbox" ${item.active ? 'checked' : ''} id="side-active-${idx}"> 有効</label>
+                        <div class="menu-item-card" data-sku="${item.sku}" data-idx="${idx}">
+                            <div class="menu-item-header">
+                                <div class="drag-handle">⋮⋮</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" ${item.active ? 'checked' : ''} onchange="toggleSideItemActive('${item.sku}', this.checked)">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="menu-item-body">
+                                <div class="form-group">
+                                    <label>商品名</label>
+                                    <input type="text" class="form-control" value="${item.name}" 
+                                           onchange="updateSideItem('${item.sku}', 'name', this.value)">
+                                </div>
+                                <div class="form-group">
+                                    <label>商品名（ローマ字）</label>
+                                    <input type="text" class="form-control" value="${item.nameRomaji || ''}" 
+                                           onchange="updateSideItem('${item.sku}', 'nameRomaji', this.value)">
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>単品価格</label>
+                                        <input type="number" class="form-control" value="${item.price_single}" 
+                                               onchange="updateSideItem('${item.sku}', 'price_single', parseInt(this.value))">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>セット時価格</label>
+                                        <input type="number" class="form-control" value="${item.price_as_side}" 
+                                               onchange="updateSideItem('${item.sku}', 'price_as_side', parseInt(this.value))">
+                                    </div>
+                                </div>
+                                <small class="text-muted">SKU: ${item.sku}</small>
+                            </div>
                         </div>
                     `).join('')}
-                    <div style="border: 1px dashed #ddd; padding: 10px; margin: 10px 0;">
-                        <input type="text" placeholder="ID (自動採番)" id="side-id-new" readonly style="background: #f5f5f5;">
-                        <input type="text" placeholder="新商品名" id="side-name-new">
-                        <input type="text" placeholder="新商品名（ローマ字）" id="side-name-romaji-new">
-                        <input type="number" placeholder="単品価格" id="side-single-new">
-                        <input type="number" placeholder="セット時価格" id="side-set-new">
-                        <label><input type="checkbox" checked id="side-active-new"> 有効</label>
-                    </div>
                 </div>
-                <button class="btn btn-primary" onclick="saveSideProducts()">保存</button>
             </div>
         `;
     } else if (state.settingsTab === 'system') {
@@ -576,8 +745,8 @@ function renderSettingsPage() {
                 <button class="btn btn-primary" onclick="saveSystemSettings()">システム設定を保存</button>
                 
                 <div style="margin: 30px 0; padding: 20px; border: 2px solid #dc3545; border-radius: 5px; background: #fff5f5;">
-                    <h4 style="color: #dc3545;">⚠️ 危険な操作</h4>
-                    <p>システムを完全に初期化します。全ての注文データ、注文番号カウンタ、設定が削除されます。</p>
+                    <h4 style="color: #dc3545;">⚠️初期化</h4>
+                    <p>システムを完全に初期化します。全ての注文データ、注文番号カウンタ、設定が削除されます</p>
                     <button class="btn" style="background: #dc3545; color: white;" onclick="resetSystem()">🔄 システム完全初期化</button>
                 </div>
             </div>
@@ -679,21 +848,45 @@ function renderSettingsPage() {
     } else if (state.settingsTab === 'chinchiro') {
         tabContent = `
             <div class="card">
-                <h3>ちんちろ設定</h3>
-                <label>
-                    <input type="checkbox" ${state.data.settings.chinchiro.enabled ? 'checked' : ''} id="chinchiro-enabled"> 
-                    ちんちろ機能を有効にする
-                </label>
-                <p>倍率設定（カンマ区切り）:</p>
-                <input type="text" value="${state.data.settings.chinchiro.multipliers.join(',')}" id="chinchiro-multipliers" style="width: 100%;">
-                <p>丸め方式:</p>
-                <select id="chinchiro-rounding">
-                    <option value="round" ${state.data.settings.chinchiro.rounding === 'round' ? 'selected' : ''}>四捨五入</option>
-                    <option value="floor" ${state.data.settings.chinchiro.rounding === 'floor' ? 'selected' : ''}>切り捨て</option>
-                    <option value="ceil" ${state.data.settings.chinchiro.rounding === 'ceil' ? 'selected' : ''}>切り上げ</option>
-                </select>
-                <br><br>
-                <button class="btn btn-primary" onclick="saveChinchoiroSettings()">保存</button>
+                <h3>🎲 ちんちろ設定</h3>
+                <div style="margin: 20px 0;">
+                    <label style="display: flex; align-items: center; gap: 10px; font-size: 1.1em;">
+                        <input type="checkbox" ${state.data.settings.chinchiro.enabled ? 'checked' : ''} id="chinchiro-enabled" style="width: 20px; height: 20px;"> 
+                        <span>ちんちろ機能を有効にする</span>
+                    </label>
+                    <small style="display: block; margin-top: 5px; color: #666;">有効にすると、注文画面でセット商品の価格倍率を選択できます</small>
+                </div>
+                
+                <div style="margin: 20px 0;">
+                    <h4>倍率設定</h4>
+                    <p style="color: #666; font-size: 0.9em;">カンマ区切りで倍率を指定（例: 0,0.5,1,2,3）</p>
+                    <input type="text" value="${state.data.settings.chinchiro.multipliers.join(',')}" id="chinchiro-multipliers" 
+                           style="width: 100%; padding: 10px; font-size: 1em; border: 1px solid #ddd; border-radius: 5px;">
+                    <div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 5px;">
+                        <strong>倍率の意味:</strong>
+                        <ul style="margin: 5px 0; padding-left: 20px;">
+                            <li><code>0</code> = 無料（ピンゾロ）</li>
+                            <li><code>0.5</code> = 半額</li>
+                            <li><code>1</code> = 通常価格（変更なし）</li>
+                            <li><code>2</code> = 2倍</li>
+                            <li><code>3</code> = 3倍</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div style="margin: 20px 0;">
+                    <h4>丸め方式</h4>
+                    <p style="color: #666; font-size: 0.9em;">調整額に小数が出た場合の処理方法</p>
+                    <select id="chinchiro-rounding" style="width: 100%; padding: 10px; font-size: 1em; border: 1px solid #ddd; border-radius: 5px;">
+                        <option value="round" ${state.data.settings.chinchiro.rounding === 'round' ? 'selected' : ''}>四捨五入</option>
+                        <option value="floor" ${state.data.settings.chinchiro.rounding === 'floor' ? 'selected' : ''}>切り捨て（お客様有利）</option>
+                        <option value="ceil" ${state.data.settings.chinchiro.rounding === 'ceil' ? 'selected' : ''}>切り上げ（店舗有利）</option>
+                    </select>
+                </div>
+                
+                <button class="btn btn-primary btn-large" onclick="saveChinchoiroSettings()" style="width: 100%; margin-top: 20px;">
+                    💾 設定を保存
+                </button>
             </div>
         `;
     }
@@ -701,23 +894,104 @@ function renderSettingsPage() {
     return tabNav + tabContent;
 }
 
+// 呼び出し画面
+function renderCallPage() {
+    const hasOrders = state.callList.length > 0;
+    const items = hasOrders ? state.callList.map(item => `
+        <div class="call-item" data-order="${item.orderNo}">
+            <div class="call-number">${item.orderNo}</div>
+            <div class="call-label">番</div>
+        </div>
+    `).join('') : '';
+    
+    return `
+        <div class="call-screen">
+            ${hasOrders ? `
+                <div class="call-header">
+                    <h1>お呼び出し</h1>
+                </div>
+                <div class="call-grid" id="call-grid">
+                    ${items}
+                </div>
+            ` : `
+                <div class="call-empty" id="call-empty">
+                    <h1>お待ちください</h1>
+                    <p>現在、呼び出し中の注文はありません</p>
+                </div>
+            `}
+            <div class="call-time"></div>
+        </div>
+    `;
+}
+
+// 呼び出し画面のスムーズ更新（ちらつき防止）
+function updateCallScreen() {
+    const hasOrders = state.callList.length > 0;
+    const callScreen = document.querySelector('.call-screen');
+    
+    if (!callScreen) {
+        // 呼び出し画面が表示されていない場合は何もしない
+        return;
+    }
+    
+    const callGrid = document.getElementById('call-grid');
+    const callEmpty = document.getElementById('call-empty');
+    
+    if (hasOrders) {
+        // 注文がある場合
+        const items = state.callList.map(item => `
+            <div class="call-item" data-order="${item.orderNo}">
+                <div class="call-number">${item.orderNo}</div>
+                <div class="call-label">番</div>
+            </div>
+        `).join('');
+        
+        if (callGrid) {
+            // グリッドが既にある場合は内容を更新
+            callGrid.innerHTML = items;
+        } else if (callEmpty) {
+            // 空表示からグリッド表示に切り替え
+            callEmpty.outerHTML = `
+                <div class="call-header">
+                    <h1>お呼び出し</h1>
+                </div>
+                <div class="call-grid" id="call-grid">
+                    ${items}
+                </div>
+            `;
+        }
+    } else {
+        // 注文がない場合
+        if (callGrid) {
+            // グリッドから空表示に切り替え
+            const header = callScreen.querySelector('.call-header');
+            if (header) header.remove();
+            callGrid.outerHTML = `
+                <div class="call-empty" id="call-empty">
+                    <h1>お待ちください</h1>
+                    <p>現在、呼び出し中の注文はありません</p>
+                </div>
+            `;
+        } else if (callEmpty) {
+            // 既に空表示の場合は何もしない
+        }
+    }
+}
+
 // エクスポートページ
 function renderExportPage() {
     return `
         <div class="card">
             <h2>データエクスポート</h2>
-            <div style="margin: 20px 0;">
-                <button class="btn btn-primary" id="ping-test">🔗 接続テスト (/api/ping)</button>
-                <button class="btn btn-success" onclick="downloadCsv()">📄 CSV エクスポート</button>
-                <button class="btn btn-warning" onclick="restoreLatest()">🔄 1クリック復旧</button>
-            </div>
+            <p style="color: #666; margin-bottom: 20px;">売上データのエクスポートとバックアップから復旧ができます</p>
             
-            <div style="margin: 20px 0; padding: 15px; border: 2px solid #007bff; border-radius: 5px;">
-                <h4>🖨️ ATOM Printerキット - 記事仕様テスト</h4>
-                <p>Scrapbox記事に基づくATOM Printerキットの印刷テスト。TX=22,RX=19,115200bpsで動作します。</p>
-                <button class="btn" style="background: #007bff; color: white; margin-right: 10px;" onclick="testNewPrintSystem()">🖨️ 新システム(記事仕様)</button>
-                <button class="btn" style="background: #28a745; color: white; margin-right: 10px;" onclick="testPrintSelfCheck()">🔍 接続診断</button>
-                <button class="btn" style="background: #ffc107; color: black;" onclick="testJapanesePrint()">🖨️ 確実印刷テスト</button>
+            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                <button class="btn btn-success btn-large" onclick="downloadCsv()" style="flex: 1; min-width: 200px; font-size: 1.2em; padding: 15px 25px;">
+                    CSV エクスポート
+                </button>
+                <button class="btn btn-warning btn-large" onclick="restoreLatest()" style="flex: 1; min-width: 200px; font-size: 1.2em; padding: 15px 25px;">
+                    復旧ボタン
+                </button>
             </div>
             
             <div id="api-result" style="margin-top: 20px;"></div>
@@ -736,10 +1010,326 @@ function setupPageEvents() {
         loadCompletedOrders();
     }
     
-    // エクスポートページの ping テスト
-    const pingBtn = document.getElementById('ping-test');
-    if (pingBtn) {
-        pingBtn.addEventListener('click', testPingApi);
+    // 呼び出し画面の初期ロード
+    if (state.page === 'call') {
+        loadCallList();
+    }
+    
+    // 品出し画面のボタンイベント委譲
+    if (state.page === 'pickup') {
+        document.addEventListener('click', handlePickupButtonClick);
+    }
+}
+
+// 品出し画面のボタンクリック処理（イベント委譲）
+function handlePickupButtonClick(event) {
+    const cookedBtn = event.target.closest('.btn-success');
+    const pickedBtn = event.target.closest('.btn-info');
+    
+    if (cookedBtn || pickedBtn) {
+        event.stopPropagation();
+        
+        const orderCard = event.target.closest('.pickup-card');
+        if (!orderCard) return;
+        
+        // data-orderNo 属性から注文番号を取得
+        const orderNo = orderCard.getAttribute('data-order-no');
+        if (!orderNo) {
+            console.error('注文番号が見つかりません');
+            return;
+        }
+        
+        // 新システムは機能していないため、旧システムを使用
+        if (cookedBtn) {
+            updateOrderStatus(orderNo, 'DONE');
+        } else if (pickedBtn) {
+            updateOrderStatus(orderNo, 'READY');
+        }
+    }
+}
+
+// 品出し画面API接続テスト
+window.testPickupApi = async function() {
+    console.log('=== 品出し画面 API接続テスト開始 ===');
+    
+    let testResults = '【接続テスト結果】\n\n';
+    
+    // テスト1: Ping
+    try {
+        console.log('テスト1: /api/ping');
+        const pingStart = Date.now();
+        const pingResponse = await fetch('/api/ping');
+        const pingTime = Date.now() - pingStart;
+        const pingData = await pingResponse.json();
+        
+        console.log(`  ✅ Ping成功 (${pingTime}ms):`, pingData);
+        testResults += `✅ Ping: OK (${pingTime}ms)\n`;
+        testResults += `   サーバーIP: ${pingData.ip || 'N/A'}\n\n`;
+    } catch (error) {
+        console.error('  ❌ Ping失敗:', error);
+        testResults += `❌ Ping: 失敗\n`;
+        testResults += `   エラー: ${error.message}\n\n`;
+        alert(testResults + '\n⚠️ サーバーとの接続に失敗しました');
+        return;
+    }
+    
+    // テスト2: 注文一覧の取得
+    try {
+        console.log('テスト2: /api/state');
+        const response = await fetch('/api/state');
+        const data = await response.json();
+        console.log('  ✅ /api/state 成功:', data.orders.length, '件の注文');
+        testResults += `✅ State: OK\n`;
+        testResults += `   注文数: ${data.orders.length}件\n\n`;
+        
+        const pickupOrders = data.orders.filter(o => 
+            (o.status === 'COOKING' || o.status === 'DONE') && !o.picked_up
+        );
+        console.log('  品出し対象:', pickupOrders.length, '件');
+        testResults += `品出し対象: ${pickupOrders.length}件\n\n`;
+        
+        if (pickupOrders.length > 0) {
+            const testOrder = pickupOrders[0];
+            console.log('  テスト対象注文:', testOrder.orderNo);
+            
+            // テスト3: 調理済みURL構築テスト
+            const cookedUrl = `/api/orders/${testOrder.orderNo}/cooked`;
+            const fullCookedUrl = `${window.location.origin}${cookedUrl}`;
+            console.log(`  調理済みURL: ${cookedUrl}`);
+            console.log(`  完全URL: ${fullCookedUrl}`);
+            testResults += `【テスト用URL】\n`;
+            testResults += `注文番号: ${testOrder.orderNo}\n`;
+            testResults += `調理済み: ${cookedUrl}\n`;
+            testResults += `品出し済み: /api/orders/${testOrder.orderNo}/picked\n\n`;
+            
+            // テスト4: 実際のPOSTリクエストテスト（注意: 実際に実行されます）
+            testResults += `⚠️ 実際のAPIを呼び出す場合は\nコンソールから以下を実行:\n`;
+            testResults += `updateOrderStatus('${testOrder.orderNo}', 'DONE') // 調理完了\n`;
+            testResults += `updateOrderStatus('${testOrder.orderNo}', 'READY') // 品出し完了\n`;
+            
+            alert(testResults);
+        } else {
+            testResults += '⚠️ 品出し対象の注文がありません\n';
+            testResults += '新しい注文を作成してからテストしてください';
+            alert(testResults);
+        }
+    } catch (error) {
+        console.error('❌ API接続テスト失敗:', error);
+        testResults += `❌ State取得: 失敗\n`;
+        testResults += `エラー: ${error.message}`;
+        alert(testResults);
+    }
+    
+    console.log('=== 品出し画面 API接続テスト終了 ===');
+};
+
+// 呼び出しリストをAPIから取得
+async function loadCallList() {
+    try {
+        console.log('呼び出しリスト取得開始...');
+        const response = await fetch('/api/call-list');
+        const data = await response.json();
+        state.callList = data.callList || [];
+        console.log('呼び出しリスト取得完了:', state.callList.length, '件', state.callList);
+        
+        if (state.page === 'call') {
+            updateCallScreen();
+        }
+    } catch (error) {
+        console.error('呼び出しリスト取得エラー:', error);
+    }
+}
+
+// 全画面表示トグル
+function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(err => {
+            console.error('全画面表示エラー:', err);
+        });
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        }
+    }
+}
+
+// 新システムのmarkCooked関数は削除（機能していないため）
+// 旧システムのupdateOrderStatus()を使用してください
+
+// 新システムのmarkPicked関数も削除（機能していないため）
+
+// 注文成功モーダルを表示
+function showOrderSuccessModal(orderNo) {
+    // 既存のモーダルがあれば削除
+    const existingModal = document.getElementById('order-success-modal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+    
+    // モーダルを作成
+    const modal = document.createElement('div');
+    modal.id = 'order-success-modal';
+    modal.className = 'modal-backdrop';
+    modal.innerHTML = `
+        <div class="modal-content" style="text-align: center; padding: 30px;">
+            <div style="font-size: 4em; color: #28a745; margin-bottom: 20px;">✅</div>
+            <h2 style="color: #28a745; margin-bottom: 15px;">注文確定</h2>
+            <p style="font-size: 1.5em; font-weight: bold; margin: 20px 0;">
+                注文番号: <span style="color: #007bff; font-size: 2em;">#${orderNo}</span>
+            </p>
+            <p style="color: #666; margin: 15px 0;">
+                注文が正常に登録されました。<br>
+                キッチン画面で確認できます。
+            </p>
+            <button class="btn btn-primary btn-large" onclick="closeOrderSuccessModal()" style="margin-top: 20px; font-size: 1.2em; padding: 12px 30px;">
+                OK
+            </button>
+        </div>
+    `;
+    
+    document.body.appendChild(modal);
+    
+    // 3秒後に自動で閉じる
+    setTimeout(() => {
+        closeOrderSuccessModal();
+    }, 3000);
+}
+
+// 注文成功モーダルを閉じる
+function closeOrderSuccessModal() {
+    const modal = document.getElementById('order-success-modal');
+    if (modal) {
+        modal.remove();
+    }
+}
+
+// メイン商品単品追加
+function addMainSingle(sku, priceMode) {
+    try {
+        if (state.data.printer.paperOut) {
+            alert('プリンターの用紙を確認してください');
+            return;
+        }
+        
+        const button = event.target;
+        if (button.disabled) return;
+        button.disabled = true;
+        
+        state.cart.push({
+            type: 'MAIN_SINGLE',
+            mainSku: sku,
+            priceMode: priceMode,
+            qty: 1
+        });
+        
+        // 視覚的フィードバック
+        button.style.backgroundColor = '#28a745';
+        const originalText = button.textContent;
+        button.textContent = '追加完了!';
+        
+        updateCartDisplay();
+        
+        setTimeout(() => {
+            button.disabled = false;
+            button.style.backgroundColor = '';
+            button.textContent = originalText;
+        }, 1000);
+        
+    } catch (error) {
+        console.error('カート追加エラー:', error);
+        alert('注文の追加に失敗しました。');
+        event.target.disabled = false;
+    }
+}
+
+// サイド選択モーダル表示
+function showSideSelectModal(mainSku, priceMode) {
+    const sideItems = state.data.menu.filter(item => item.category === 'SIDE' && item.active);
+    
+    if (sideItems.length === 0) {
+        alert('利用可能なサイド商品がありません');
+        return;
+    }
+    
+    const mainItem = state.data.menu.find(item => item.sku === mainSku);
+    if (!mainItem) return;
+    
+    const mainPrice = priceMode === 'presale' ? 
+        mainItem.price_normal + mainItem.presale_discount_amount : 
+        mainItem.price_normal;
+    
+    const modalHtml = `
+        <div class="modal-backdrop" onclick="closeSideSelectModal()">
+            <div class="modal-content" onclick="event.stopPropagation()" style="max-width: 600px;">
+                <div class="card">
+                    <div class="modal-header">
+                        <h3>🍟 サイド商品を選択</h3>
+                        <button class="btn-close" onclick="closeSideSelectModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p><strong>メイン:</strong> ${mainItem.name} (${priceMode === 'presale' ? '前売' : '通常'}: ${mainPrice}円)</p>
+                        <p style="color: #666; margin-bottom: 15px;">サイド商品を1つ選択してください:</p>
+                        <div class="side-select-grid" style="display: grid; gap: 10px;">
+                            ${sideItems.map(side => `
+                                <button class="btn btn-secondary" 
+                                        onclick="addSetToCart('${mainSku}', '${priceMode}', '${side.sku}')"
+                                        style="width: 100%; padding: 15px; text-align: left;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <span style="font-size: 1.1em; font-weight: bold;">${side.name}</span>
+                                        <span style="color: #28a745; font-weight: bold;">+${side.price_as_side}円</span>
+                                    </div>
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    const modal = document.createElement('div');
+    modal.id = 'side-select-modal';
+    modal.innerHTML = modalHtml;
+    document.body.appendChild(modal);
+}
+
+// サイド選択モーダルを閉じる
+function closeSideSelectModal() {
+    const modal = document.getElementById('side-select-modal');
+    if (modal) {
+        modal.remove();
+    }
+}
+
+// セットをカートに追加
+function addSetToCart(mainSku, priceMode, sideSku) {
+    try {
+        if (state.data.printer.paperOut) {
+            alert('プリンターの用紙を確認してください');
+            return;
+        }
+        
+        state.cart.push({
+            type: 'SET',
+            mainSku: mainSku,
+            priceMode: priceMode,
+            sideSkus: [sideSku], // 1つのサイドのみ
+            qty: 1
+        });
+        
+        updateCartDisplay();
+        closeSideSelectModal();
+        
+        // 成功フィードバック
+        const mainItem = state.data.menu.find(item => item.sku === mainSku);
+        const sideItem = state.data.menu.find(item => item.sku === sideSku);
+        if (mainItem && sideItem) {
+            alert(`✅ セットを追加しました\n${mainItem.name} + ${sideItem.name}`);
+        }
+        
+    } catch (error) {
+        console.error('セット追加エラー:', error);
+        alert('セットの追加に失敗しました。');
     }
 }
 
@@ -835,28 +1425,46 @@ function updateCartDisplay() {
         return;
     }
     
+    const chinchoiroEnabled = state.data.settings.chinchiro.enabled;
+    const multipliers = state.data.settings.chinchiro.multipliers || [1];
+    
     let total = 0;
     const itemsHtml = state.cart.map((cartItem, idx) => {
         let itemTotal = 0;
+        let basePrice = 0;
         let description = '';
+        let isSet = false;
         
-        if (cartItem.type === 'SET') {
+        if (cartItem.type === 'MAIN_SINGLE') {
+            // メイン商品単品
+            const mainItem = state.data.menu.find(item => item.sku === cartItem.mainSku);
+            if (mainItem) {
+                const mainPrice = cartItem.priceMode === 'presale' ? 
+                    mainItem.price_normal + mainItem.presale_discount_amount : 
+                    mainItem.price_normal;
+                itemTotal = mainPrice;
+                description = `${mainItem.name} (${cartItem.priceMode === 'presale' ? '前売' : '通常'})`;
+            }
+            basePrice = itemTotal;
+        } else if (cartItem.type === 'SET') {
+            isSet = true;
             const mainItem = state.data.menu.find(item => item.sku === cartItem.mainSku);
             if (mainItem) {
                 const mainPrice = cartItem.priceMode === 'presale' ? 
                     mainItem.price_normal + mainItem.presale_discount_amount : 
                     mainItem.price_normal;
                 itemTotal += mainPrice;
-                description = `${mainItem.name} (${cartItem.priceMode === 'presale' ? '前売' : '通常'})`;
+                description = `🍔 ${mainItem.name} (${cartItem.priceMode === 'presale' ? '前売' : '通常'})`;
                 
                 cartItem.sideSkus.forEach(sideSku => {
                     const sideItem = state.data.menu.find(item => item.sku === sideSku);
                     if (sideItem) {
                         itemTotal += sideItem.price_as_side;
-                        description += ` + ${sideItem.name}`;
+                        description += ` + 🍟 ${sideItem.name}`;
                     }
                 });
             }
+            basePrice = itemTotal;
         } else if (cartItem.type === 'SIDE_SINGLE') {
             const sideItem = state.data.menu.find(item => item.sku === cartItem.sideSku);
             if (sideItem) {
@@ -865,18 +1473,98 @@ function updateCartDisplay() {
             }
         }
         
-        total += itemTotal * cartItem.qty;
+        // ちんちろ適用（SET商品のみ）
+        let chinchoiroMultiplier = cartItem.chinchoiroMultiplier || 1.0;
+        let chinchoiroResult = cartItem.chinchoiroResult || 'なし';
         
-        return `
-            <div style="border: 1px solid #ddd; padding: 10px; margin: 5px 0;">
-                <p>${description}</p>
-                <p>数量: ${cartItem.qty} × ${itemTotal}円 = ${itemTotal * cartItem.qty}円</p>
-                <button class="btn btn-secondary" onclick="removeFromCart(${idx})">削除</button>
-            </div>
-        `;
+        if (isSet && chinchoiroEnabled) {
+            const adjustment = calculateChinchoiroAdjustmentClient(basePrice, chinchoiroMultiplier);
+            itemTotal = basePrice + adjustment;
+            
+            // ちんちろ選択UI
+            const chinchoiroOptions = multipliers.map(m => {
+                const label = getChinchoiroLabel(m);
+                const selected = Math.abs(m - chinchoiroMultiplier) < 0.01 ? 'selected' : '';
+                return `<option value="${m}" ${selected}>${label}</option>`;
+            }).join('');
+            
+            const chinchoiroSelect = `
+                <div style="margin-top: 10px; padding: 10px; background: #fff3cd; border-radius: 5px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">🎲 ちんちろ結果:</label>
+                    <select class="form-control" onchange="applyChinchoiro(${idx}, parseFloat(this.value))" style="padding: 5px;">
+                        ${chinchoiroOptions}
+                    </select>
+                    ${adjustment !== 0 ? `<small style="display: block; margin-top: 5px; color: ${adjustment > 0 ? '#d9534f' : '#5cb85c'};">
+                        調整額: ${adjustment > 0 ? '+' : ''}${adjustment}円
+                    </small>` : ''}
+                </div>
+            `;
+            
+            const lineTotal = itemTotal * cartItem.qty;
+            total += lineTotal;
+            
+            return `
+                <div class="cart-item-card" style="border: 2px solid #ffc107; padding: 12px; margin: 8px 0; border-radius: 8px; background: #fffef5;">
+                    <p style="margin: 0 0 8px 0; font-weight: bold;">${description}</p>
+                    <p style="margin: 0 0 8px 0;">基本価格: ${basePrice}円 × ${cartItem.qty}個</p>
+                    ${chinchoiroSelect}
+                    <p style="margin: 8px 0 0 0; font-size: 1.1em; font-weight: bold; color: #333;">
+                        小計: ${lineTotal}円
+                    </p>
+                    <button class="btn btn-secondary btn-sm" onclick="removeFromCart(${idx})" style="margin-top: 8px;">削除</button>
+                </div>
+            `;
+        } else {
+            const lineTotal = itemTotal * cartItem.qty;
+            total += lineTotal;
+            
+            return `
+                <div style="border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 5px;">
+                    <p style="margin: 0 0 8px 0;">${description}</p>
+                    <p style="margin: 0;">数量: ${cartItem.qty} × ${itemTotal}円 = ${lineTotal}円</p>
+                    <button class="btn btn-secondary btn-sm" onclick="removeFromCart(${idx})" style="margin-top: 5px;">削除</button>
+                </div>
+            `;
+        }
     }).join('');
     
-    cartDiv.innerHTML = itemsHtml + `<p><strong>合計: ${total}円</strong></p>`;
+    cartDiv.innerHTML = itemsHtml + `<p style="margin-top: 15px; font-size: 1.3em;"><strong>合計: ${total}円</strong></p>`;
+    updateConfirmOrderButton();
+}
+
+// ちんちろラベル取得
+function getChinchoiroLabel(multiplier) {
+    if (multiplier === 0) return 'ピンゾロ（無料）';
+    if (multiplier === 0.5) return '半額';
+    if (multiplier === 1.0) return 'なし（通常）';
+    if (multiplier === 2.0) return '2倍';
+    if (multiplier === 3.0) return '3倍';
+    return `${multiplier}倍`;
+}
+
+// クライアント側のちんちろ調整額計算
+function calculateChinchoiroAdjustmentClient(basePrice, multiplier) {
+    const rounding = state.data.settings.chinchiro.rounding || 'round';
+    const rawAdjustment = basePrice * (multiplier - 1.0);
+    
+    if (rounding === 'floor') {
+        return Math.floor(rawAdjustment);
+    } else if (rounding === 'ceil') {
+        return Math.ceil(rawAdjustment);
+    } else {
+        return Math.round(rawAdjustment);
+    }
+}
+
+// ちんちろ適用
+function applyChinchoiro(cartIndex, multiplier) {
+    if (cartIndex < 0 || cartIndex >= state.cart.length) return;
+    
+    const cartItem = state.cart[cartIndex];
+    cartItem.chinchoiroMultiplier = multiplier;
+    cartItem.chinchoiroResult = getChinchoiroLabel(multiplier);
+    
+    updateCartDisplay();
 }
 
 function removeFromCart(index) {
@@ -884,10 +1572,43 @@ function removeFromCart(index) {
     updateCartDisplay();
 }
 
+// 注文確定ボタンの活性/非活性を更新
+function updateConfirmOrderButton() {
+    const btn = document.querySelector('#confirm-order-btn, [data-action="confirm-order"]');
+    if (!btn) return;
+    const shouldDisable = (state.cart.length === 0) || (state?.data?.printer?.paperOut);
+    btn.disabled = shouldDisable;
+}
+
 // NaN耐性のある数値変換関数
 function safeNum(v) { 
     const n = Number(v); 
     return Number.isFinite(n) ? n : 0; 
+}
+
+// 注文確定ボタンのハンドラー（確実に動作させる）
+async function handleConfirmOrder(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    const button = event.target;
+    
+    // 二重送信ガード
+    if (button.dataset.loading === "1" || button.disabled) {
+        console.log('注文送信中またはボタン無効 - スキップ');
+        return;
+    }
+    
+    console.log('handleConfirmOrder: 注文確定処理開始');
+    button.dataset.loading = "1";
+    
+    try {
+        await submitOrder();
+    } catch (error) {
+        console.error('注文確定エラー:', error);
+    } finally {
+        delete button.dataset.loading;
+    }
 }
 
 async function submitOrder() {
@@ -945,18 +1666,16 @@ async function submitOrder() {
             // 成功時の処理
             clearCart();
             await loadStateData(); // 状態更新
+            updateConfirmOrderButton();
             
-            // 成功通知
+            // 成功通知モーダルを表示
+            showOrderSuccessModal(result.orderNo);
+            
+            // ボタン復元
             if (submitBtn) {
-                submitBtn.style.backgroundColor = '#28a745';
-                submitBtn.textContent = `✅ 注文確定: #${result.orderNo}`;
-                
-                // 2秒後にボタン復元
-                setTimeout(() => {
-                    submitBtn.disabled = false;
-                    submitBtn.style.backgroundColor = '';
-                    submitBtn.textContent = '📝 注文確定';
-                }, 2000);
+                submitBtn.disabled = false;
+                submitBtn.style.backgroundColor = '';
+                submitBtn.textContent = '📝 注文確定';
             }
             
             return; // 成功したのでリトライループを抜ける
@@ -1004,22 +1723,48 @@ async function submitOrder() {
 
 // 注文操作
 async function cancelOrder(orderNo) {
+    console.log('キャンセルリクエスト: 注文番号=', orderNo, 'タイプ=', typeof orderNo);
+    
+    // 注文データの存在確認
+    if (state.data && state.data.orders) {
+        const order = state.data.orders.find(o => o.orderNo === orderNo);
+        console.log('注文データ検索結果:', order);
+        if (order) {
+            console.log('注文詳細:', {
+                orderNo: order.orderNo,
+                status: order.status,
+                itemCount: order.items ? order.items.length : 0
+            });
+        } else {
+            console.error('注文が見つかりません:', orderNo);
+        }
+    }
+    
     const reason = prompt('キャンセル理由:') || '';
     
     try {
+        const requestBody = `orderNo=${orderNo}&reason=${encodeURIComponent(reason)}`;
+        console.log('送信データ:', requestBody);
+        
         const response = await fetch('/api/orders/cancel', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `orderNo=${orderNo}&reason=${encodeURIComponent(reason)}`
+            body: requestBody
         });
         
+        console.log('レスポンス:', response.status, response.statusText);
+        
         if (response.ok) {
+            console.log('キャンセル成功');
             alert(`注文 # ${orderNo} をキャンセルしました`);
             loadStateData();
         } else {
-            alert('キャンセルに失敗しました');
+            const errorText = await response.text();
+            console.error('キャンセル失敗:', errorText);
+            alert(`キャンセルに失敗しました: ${errorText}`);
         }
     } catch (error) {
+        console.error('キャンセルエラー:', error);
         alert(`通信エラー: ${error.message}`);
     }
 }
@@ -1198,6 +1943,181 @@ async function saveChinchoiroSettings() {
     }
 }
 
+// 新設定UI用の関数群
+function updateMainItem(sku, field, value) {
+    if (!state.data) return;
+    const item = state.data.menu.find(m => m.sku === sku && m.category === 'MAIN');
+    if (item) {
+        item[field] = value;
+        debouncedSaveMenuItem(item);
+    }
+}
+
+function updateSideItem(sku, field, value) {
+    if (!state.data) return;
+    const item = state.data.menu.find(m => m.sku === sku && m.category === 'SIDE');
+    if (item) {
+        item[field] = value;
+        debouncedSaveMenuItem(item);
+    }
+}
+
+function toggleMainItemActive(sku, active) {
+    if (!state.data) return;
+    const item = state.data.menu.find(m => m.sku === sku && m.category === 'MAIN');
+    if (item) {
+        item.active = active;
+        saveMenuItemImmediate(item);
+    }
+}
+
+function toggleSideItemActive(sku, active) {
+    if (!state.data) return;
+    const item = state.data.menu.find(m => m.sku === sku && m.category === 'SIDE');
+    if (item) {
+        item.active = active;
+        saveMenuItemImmediate(item);
+    }
+}
+
+function addNewMainItem() {
+    const name = prompt('新しいメイン商品名を入力してください:');
+    if (!name) return;
+    
+    const nameRomaji = prompt('商品名（ローマ字）を入力してください:', name);
+    const priceNormal = parseInt(prompt('通常価格を入力してください:', '500') || '500');
+    const presaleDiscount = parseInt(prompt('前売割引額を入力してください（マイナス値）:', '-100') || '-100');
+    
+    const newItem = {
+        name: name,
+        nameRomaji: nameRomaji || name,
+        category: 'MAIN',
+        active: true,
+        price_normal: priceNormal,
+        presale_discount_amount: presaleDiscount,
+        price_presale: 0,
+        price_single: 0,
+        price_as_side: 0
+    };
+    
+    saveNewMenuItem(newItem);
+}
+
+function addNewSideItem() {
+    const name = prompt('新しいサイド商品名を入力してください:');
+    if (!name) return;
+    
+    const nameRomaji = prompt('商品名（ローマ字）を入力してください:', name);
+    const priceSingle = parseInt(prompt('単品価格を入力してください:', '200') || '200');
+    const priceAsside = parseInt(prompt('セット時価格を入力してください:', '100') || '100');
+    
+    const newItem = {
+        name: name,
+        nameRomaji: nameRomaji || name,
+        category: 'SIDE',
+        active: true,
+        price_normal: 0,
+        presale_discount_amount: 0,
+        price_presale: 0,
+        price_single: priceSingle,
+        price_as_side: priceAsside
+    };
+    
+    saveNewMenuItem(newItem);
+}
+
+async function saveNewMenuItem(item) {
+    try {
+        const endpoint = item.category === 'MAIN' ? '/api/products/main' : '/api/products/side';
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: [item] })
+        });
+        
+        if (response.ok) {
+            alert('商品を追加しました');
+            await loadStateData();
+            render();
+        } else {
+            alert('商品の追加に失敗しました');
+        }
+    } catch (error) {
+        console.error('商品追加エラー:', error);
+        alert('通信エラーが発生しました');
+    }
+}
+
+// Debounce用のタイマー
+let saveMenuTimer = null;
+
+function debouncedSaveMenu() {
+    if (saveMenuTimer) clearTimeout(saveMenuTimer);
+    saveMenuTimer = setTimeout(() => {
+        saveMenuImmediate();
+    }, 1000); // 1秒後に保存
+}
+
+// 個別商品を即座に保存（既存のPOSTエンドポイント使用、1アイテムのみ送信）
+async function saveMenuItemImmediate(item) {
+    if (!item || !item.sku) {
+        console.error('SKUが見つかりません:', item);
+        return;
+    }
+    
+    try {
+        const endpoint = item.category === 'MAIN' ? '/api/products/main' : '/api/products/side';
+        
+        // 既存のPOSTエンドポイントを使用（upsert動作）
+        // 重要: 必ずSKU（id）を含める、1アイテムのみの配列で送信
+        const payload = {
+            items: [{
+                id: item.sku,  // SKUを明示的にidとして送信
+                name: item.name,
+                nameRomaji: item.nameRomaji || item.name,
+                active: item.active,
+                ...(item.category === 'MAIN' ? {
+                    price_normal: item.price_normal,
+                    presale_discount_amount: item.presale_discount_amount
+                } : {
+                    price_single: item.price_single,
+                    price_as_side: item.price_as_side
+                })
+            }]
+        };
+        
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        if (response.ok) {
+            console.log(`✅ 商品を更新しました: ${item.name} (${item.sku})`);
+        } else {
+            console.error('❌ 商品の更新に失敗しました:', await response.text());
+        }
+    } catch (error) {
+        console.error('❌ 商品更新エラー:', error);
+    }
+}
+
+// デバウンス処理用のタイマー
+let saveMenuItemTimer = null;
+function debouncedSaveMenuItem(item) {
+    if (saveMenuItemTimer) {
+        clearTimeout(saveMenuItemTimer);
+    }
+    saveMenuItemTimer = setTimeout(() => {
+        saveMenuItemImmediate(item);
+    }, 1000); // 1秒後に保存
+}
+
+// 旧関数（互換性のため残す、ただし警告を表示）
+async function saveMenuImmediate() {
+    console.warn('⚠️ saveMenuImmediate()は非推奨です。個別更新を使用してください。');
+}
+
 // エクスポート操作
 async function downloadCsv() {
     try {
@@ -1325,30 +2245,6 @@ async function restoreLatest() {
 }
 
 // API ping テスト
-async function testPingApi() {
-    const resultDiv = document.getElementById('api-result');
-    resultDiv.innerHTML = '<p>⏳ 接続テスト中...</p>';
-    
-    try {
-        const response = await fetch('/api/ping');
-        const data = await response.json();
-        
-        resultDiv.innerHTML = `
-            <div class="card" style="border-left-color: #28a745;">
-                <h3>✅ 接続テスト成功</h3>
-                <pre>${JSON.stringify(data, null, 2)}</pre>
-            </div>
-        `;
-    } catch (error) {
-        resultDiv.innerHTML = `
-            <div class="card" style="border-left-color: #dc3545;">
-                <h3>❌ 接続テスト失敗</h3>
-                <p>エラー: ${error.message}</p>
-            </div>
-        `;
-    }
-}
-
 // 注文詳細モーダル表示
 function showOrderDetail(orderNo) {
     if (!state.data) return;
@@ -1420,24 +2316,30 @@ function closeModal() {
 function getStatusActions(order) {
     const actions = [];
     
-    if (order.status === 'COOKING') {
+    // 旧システム（機能している方のみ使用）
+    if (order.status === 'COOKING' && !order.cooked) {
         actions.push(`
-            <button class="btn btn-success" onclick="updateOrderStatus('${order.orderNo}', 'DONE')">
-                調理完了
+            <button class="btn btn-warning" onclick="updateOrderStatus('${order.orderNo}', 'DONE')" 
+                    style="width: 100%; margin-top: 5px; font-size: 1.6em; padding: 20px 30px;">
+                📌 調理完了
             </button>
         `);
     }
     
-    if (order.status === 'DONE') {
+    if (order.status === 'DONE' && !order.picked_up) {
         actions.push(`
-            <button class="btn btn-info" onclick="updateOrderStatus('${order.orderNo}', 'READY')">
-                品出し完了
+            <button class="btn btn-secondary" onclick="updateOrderStatus('${order.orderNo}', 'READY')" 
+                    style="width: 100%; margin-top: 5px; font-size: 1.6em; padding: 20px 30px;">
+                📌 品出し完了
             </button>
         `);
     }
     
     return actions.length > 0 ? `
         <div class="modal-actions">
+            <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 15px; text-align: center;">
+                <strong style="color: #007acc;">👇 状態を変更する</strong>
+            </div>
             ${actions.join('')}
         </div>
     ` : '';
@@ -1455,9 +2357,13 @@ function getStatusLabel(status) {
     return labels[status] || status;
 }
 
-// 注文状態更新（新しいPATCH API使用）
+// 注文状態更新（旧システム・PATCH API使用）
+// 新システムが機能していないため、こちらを使用
 async function updateOrderStatus(orderNo, newStatus) {
+    console.log(`注文状態更新: ${orderNo} → ${newStatus}`);
+    
     try {
+        // 旧APIを使用（PATCH /api/orders/:id）
         const response = await fetch(`/api/orders/${orderNo}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -1465,21 +2371,24 @@ async function updateOrderStatus(orderNo, newStatus) {
         });
         
         if (response.ok) {
-            console.log(`注文 ${orderNo} を ${newStatus} に更新`);
+            console.log(`✅ 注文 ${orderNo} を ${newStatus} に更新`);
             closeModal();
-            // データ再取得
             await loadStateData();
+            await loadCallList();
         } else {
-            alert('状態更新に失敗しました');
+            const errorText = await response.text();
+            console.error(`❌ API失敗: ${errorText}`);
+            alert(`状態更新に失敗しました\nStatus: ${response.status}`);
         }
     } catch (error) {
         console.error('状態更新エラー:', error);
-        alert('状態更新に失敗しました');
+        alert(`状態更新に失敗しました\n${error.message}`);
     }
 }
 
-// 既存の completeOrder を新しい関数にリダイレクト（互換性保持）
+// 既存の completeOrder を旧システムにリダイレクト（互換性保持）
 function completeOrder(orderNo) {
+    console.warn('⚠️ completeOrder は非推奨です。updateOrderStatus を使用してください');
     updateOrderStatus(orderNo, 'DONE');
 }
 
@@ -1521,58 +2430,7 @@ async function resetSystem() {
 }
 
 // 日本語印刷テスト
-async function testJapanesePrint() {
-    const resultDiv = document.getElementById('api-result');
-    
-    if (!confirm('🖨️ 日本語印刷テストを実行します。\n\nサンプルレシートが印刷されます。\nプリンタの準備はよろしいですか？')) {
-        return;
-    }
-    
-    try {
-        resultDiv.innerHTML = '<p>🖨️ 印刷テスト実行中...</p>';
-        
-        const response = await fetch('/api/print/test-jp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        
-        if (response.ok) {
-            const result = await response.json();
-            resultDiv.innerHTML = `
-                <div style="color: green; border: 1px solid green; padding: 10px; border-radius: 5px;">
-                    <h4>✅ 印刷テスト成功</h4>
-                    <p>${result.message}</p>
-                    <p><strong>印刷内容:</strong></p>
-                    <ul>
-                        <li>店名: 九大料理サークルきゅう食 → Kyushoku Burger</li>
-                        <li>注文番号: 55番 → Order No. 55</li>
-                        <li>商品: 照り焼きバーガー x1 → Teriyaki Burger x1</li>
-                        <li>商品: きゅう食バーガー x1 → Kyushoku Burger x1</li>
-                        <li>合計: 1500円 → Total: 1500 yen</li>
-                        <li>フッター: Thank you!</li>
-                    </ul>
-                </div>
-            `;
-        } else {
-            const errorData = await response.json();
-            resultDiv.innerHTML = `
-                <div style="color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
-                    <h4>❌ 印刷テスト失敗</h4>
-                    <p>${errorData.error || '不明なエラー'}</p>
-                    <p>プリンタの接続と用紙を確認してください</p>
-                </div>
-            `;
-        }
-    } catch (error) {
-        console.error('印刷テストエラー:', error);
-        resultDiv.innerHTML = `
-            <div style="color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
-                <h4>❌ 印刷テスト失敗</h4>
-                <p>通信エラー: ${error.message}</p>
-            </div>
-        `;
-    }
-}
+// testJapanesePrint() function removed to reduce code size
 
 // 注文済み一覧の表示・非表示切り替え
 function toggleCompletedOrders() {
@@ -1752,22 +2610,46 @@ function refreshSalesStats() {
 
 // レシート再印刷機能
 async function reprintReceipt(orderNo) {
+    console.log('再印刷リクエスト: 注文番号=', orderNo, 'タイプ=', typeof orderNo);
+    
     if (!confirm(`注文 #${orderNo} のレシートを再印刷しますか？`)) {
         return;
     }
     
+    // 注文データの存在確認
+    if (state.data && state.data.orders) {
+        const order = state.data.orders.find(o => o.orderNo === orderNo);
+        console.log('注文データ検索結果:', order);
+        if (order) {
+            console.log('注文詳細:', {
+                orderNo: order.orderNo,
+                status: order.status,
+                itemCount: order.items ? order.items.length : 0
+            });
+        } else {
+            console.error('注文が見つかりません:', orderNo);
+        }
+    }
+    
     try {
+        const requestBody = { orderNo: orderNo };
+        console.log('送信データ:', requestBody);
+        
         const response = await fetch('/api/orders/reprint', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orderNo: orderNo })
+            body: JSON.stringify(requestBody)
         });
+        
+        console.log('レスポンス:', response.status, response.statusText);
         
         if (response.ok) {
             const result = await response.json();
+            console.log('成功:', result);
             alert(`✅ レシート再印刷を実行しました\n注文番号: ${orderNo}`);
         } else {
             const errorData = await response.json();
+            console.error('エラーレスポンス:', errorData);
             alert(`❌ 再印刷に失敗しました: ${errorData.error || '不明なエラー'}`);
         }
     } catch (error) {
@@ -1777,106 +2659,6 @@ async function reprintReceipt(orderNo) {
 }
 
 // T4. 新印刷システムテスト
-async function testNewPrintSystem() {
-    const resultDiv = document.getElementById('api-result');
-    
-    if (!confirm('🖨️ 新しい日本語印刷システムのテストを実行します。\n\nサンプルレシートが印刷されます。\nプリンタの準備はよろしいですか？')) {
-        return;
-    }
-    
-    try {
-        resultDiv.innerHTML = '<p>🖨️ 新印刷システムテスト実行中...</p>';
-        
-        const response = await fetch('/api/print/test', {
-            method: 'GET'
-        });
-        
-        const result = await response.json();
-        
-        if (response.ok && result.ok) {
-            resultDiv.innerHTML = `
-                <div style="color: green; border: 1px solid green; padding: 10px; border-radius: 5px;">
-                    <h4>✅ 新印刷システムテスト成功</h4>
-                    <p>${result.message}</p>
-                    <p><strong>印刷内容:</strong></p>
-                    <ul>
-                        <li>完全初期化: printerInit() 実行</li>
-                        <li>英語店名: ビットマップレンダリング</li>
-                        <li>注文番号: TEST-EN</li>
-                        <li>商品: Teriyaki Burger, Kyushoku Burger (英語のみ)</li>
-                        <li>自動フォールバック: GS v 0 → ESC * 対応</li>
-                        <li>検査用黒バー付き</li>
-                        <li>中国語文字化け完全回避</li>
-                    </ul>
-                </div>
-            `;
-        } else {
-            resultDiv.innerHTML = `
-                <div style="color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
-                    <h4>❌ 新印刷システムテスト失敗</h4>
-                    <p>${result.error || '不明なエラー'}</p>
-                    <p>プリンタの接続と電源を確認してください</p>
-                </div>
-            `;
-        }
-    } catch (error) {
-        console.error('新印刷システムテストエラー:', error);
-        resultDiv.innerHTML = `
-            <div style="color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
-                <h4>❌ 新印刷システムテスト失敗</h4>
-                <p>通信エラー: ${error.message}</p>
-            </div>
-        `;
-    }
-}
+// testNewPrintSystem() function removed to reduce code size
 
-// T4. プリンタ自己診断テスト
-async function testPrintSelfCheck() {
-    const resultDiv = document.getElementById('api-result');
-    
-    if (!confirm('🔍 プリンタ自己診断を実行します。\n\n診断パターンが印刷されます。\nプリンタの準備はよろしいですか？')) {
-        return;
-    }
-    
-    try {
-        resultDiv.innerHTML = '<p>🔍 プリンタ自己診断実行中...</p>';
-        
-        const response = await fetch('/api/print/selfcheck', {
-            method: 'GET'
-        });
-        
-        const result = await response.json();
-        
-        if (response.ok && result.ok) {
-            resultDiv.innerHTML = `
-                <div style="color: green; border: 1px solid green; padding: 10px; border-radius: 5px;">
-                    <h4>✅ プリンタ自己診断成功</h4>
-                    <p>${result.message}</p>
-                    <p><strong>診断パターン:</strong></p>
-                    <ul>
-                        <li>黒バー (384×24ドット)</li>
-                        <li>格子柄パターン</li>
-                        <li>"SELF CHECK OK" テキスト</li>
-                        <li>自動フォールバック機能確認</li>
-                    </ul>
-                </div>
-            `;
-        } else {
-            resultDiv.innerHTML = `
-                <div style="color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
-                    <h4>❌ プリンタ自己診断失敗</h4>
-                    <p>${result.error || '不明なエラー'}</p>
-                    <p>プリンタの接続、電源、用紙を確認してください</p>
-                </div>
-            `;
-        }
-    } catch (error) {
-        console.error('プリンタ自己診断エラー:', error);
-        resultDiv.innerHTML = `
-            <div style="color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
-                <h4>❌ プリンタ自己診断失敗</h4>
-                <p>通信エラー: ${error.message}</p>
-            </div>
-        `;
-    }
-}
+// testPrintSelfCheck() function removed to reduce code size

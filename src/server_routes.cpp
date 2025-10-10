@@ -74,6 +74,12 @@ void initHttpRoutes(AsyncWebServer &server) {
       o["status"]  = od.status;
       o["ts"]      = od.ts;
       o["printed"] = od.printed;
+      o["cooked"] = od.cooked;
+      o["pickup_called"] = od.pickup_called;
+      o["picked_up"] = od.picked_up;
+      if (!od.cancelReason.isEmpty()) {
+        o["cancelReason"] = od.cancelReason;
+      }
 
       JsonArray itemsArray = o["items"].to<JsonArray>();
       for (const auto& item : od.items) {
@@ -84,6 +90,11 @@ void initHttpRoutes(AsyncWebServer &server) {
         j["unitPriceApplied"] = item.unitPriceApplied;
         j["priceMode"] = item.priceMode;
         j["kind"] = item.kind;
+        j["unitPrice"] = item.unitPrice;
+        if (!item.discountName.isEmpty()) {
+          j["discountName"] = item.discountName;
+          j["discountValue"] = item.discountValue;
+        }
       }
     }
 
@@ -385,16 +396,35 @@ void initHttpRoutes(AsyncWebServer &server) {
 
   // /api/orders/cancel
   server.on("/api/orders/cancel", HTTP_POST, [](AsyncWebServerRequest *request) {
+    Serial.println("[API] POST /api/orders/cancel");
+    
     if (!request->hasParam("orderNo", true)) {
+      Serial.println("エラー: orderNoパラメータがありません");
       request->send(400, "application/json", "{\"error\":\"Missing orderNo\"}");
       return;
     }
     String orderNo = request->getParam("orderNo", true)->value();
     String reason = request->hasParam("reason", true) ? request->getParam("reason", true)->value() : "";
+    
+    Serial.printf("キャンセル対象: 注文番号=%s, 理由=%s\n", orderNo.c_str(), reason.c_str());
+    Serial.printf("現在の注文数: %d件\n", S().orders.size());
 
     bool found=false;
-    for (auto& o : S().orders) if (o.orderNo == orderNo) { o.status="CANCELLED"; o.cancelReason=reason; found=true; break; }
-    if (!found) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
+    for (auto& o : S().orders) {
+      if (o.orderNo == orderNo) { 
+        Serial.printf("注文発見: %s (status=%s → CANCELLED)\n", o.orderNo.c_str(), o.status.c_str());
+        o.status="CANCELLED"; 
+        o.cancelReason=reason; 
+        found=true; 
+        break; 
+      }
+    }
+    
+    if (!found) { 
+      Serial.printf("エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
+      request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
+      return; 
+    }
 
     walAppend("ORDER_CANCEL," + orderNo + "," + reason);
     snapshotSave();
@@ -402,6 +432,7 @@ void initHttpRoutes(AsyncWebServer &server) {
     JsonDocument notify; notify["type"]="order.updated"; notify["orderNo"]=orderNo; notify["status"]="CANCELLED";
     String msg; serializeJson(notify, msg); wsBroadcast(msg);
 
+    Serial.printf("キャンセル完了: 注文番号 %s\n", orderNo.c_str());
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -409,23 +440,53 @@ void initHttpRoutes(AsyncWebServer &server) {
   server.on("/api/orders/reprint", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
+      Serial.printf("[API] POST /api/orders/reprint - データ長: %d\n", len);
+      
       JsonDocument doc;
       if (deserializeJson(doc, (char*)data, len)) {
+        Serial.println("エラー: JSONパースに失敗");
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
       }
       String orderNo = doc["orderNo"] | "";
-      if (orderNo.isEmpty()) { request->send(400, "application/json", "{\"error\":\"Missing orderNo\"}"); return; }
+      Serial.printf("受信した注文番号: '%s'\n", orderNo.c_str());
+      
+      if (orderNo.isEmpty()) { 
+        Serial.println("エラー: 注文番号が空");
+        request->send(400, "application/json", "{\"error\":\"Missing orderNo\"}"); 
+        return; 
+      }
+
+      Serial.printf("現在の注文数: %d件\n", S().orders.size());
+      for (const auto& o : S().orders) {
+        Serial.printf("  注文: %s (status=%s, items=%d件)\n", 
+                     o.orderNo.c_str(), o.status.c_str(), o.items.size());
+      }
 
       Order* found=nullptr;
       for (auto& o : S().orders) if (o.orderNo == orderNo) { found=&o; break; }
-      if (!found) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
+      
+      if (!found) { 
+        Serial.printf("エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
+        request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
+        return; 
+      }
+      
+      Serial.printf("注文発見: %s (items=%d件)\n", found->orderNo.c_str(), found->items.size());
+      
       if (found->status == "CANCELLED") {
+        Serial.println("エラー: キャンセル済み注文は再印刷不可");
         request->send(400, "application/json", "{\"error\":\"Cannot reprint cancelled order\"}");
         return;
       }
 
-      Serial.printf("レシート再印刷: 注文番号 %s\n", orderNo.c_str());
+      if (found->items.empty()) {
+        Serial.println("警告: 注文に明細がありません");
+        request->send(400, "application/json", "{\"error\":\"Order has no items\"}");
+        return;
+      }
+
+      Serial.printf("レシート再印刷キュー追加: 注文番号 %s (%d件)\n", orderNo.c_str(), found->items.size());
       enqueuePrint(*found);
 
       JsonDocument res; res["ok"]=true; res["orderNo"]=orderNo; res["message"]="Reprint job queued successfully";
@@ -488,19 +549,148 @@ void initHttpRoutes(AsyncWebServer &server) {
       String newStatus = String((const char*)(doc["status"] | ""));
       if (newStatus.isEmpty()) { request->send(400, "application/json", "{\"error\":\"Missing status\"}"); return; }
 
+      Serial.printf("[API] PATCH /api/orders/%s - status=%s (互換モード)\n", orderNo.c_str(), newStatus.c_str());
+
       bool found=false;
-      for (auto& o : S().orders) if (o.orderNo == orderNo) { o.status=newStatus; found=true; break; }
+      String notifyType = "order.updated";
+      
+      for (auto& o : S().orders) {
+        if (o.orderNo == orderNo) {
+          o.status = newStatus;
+          found = true;
+          
+          // 互換性レイヤー: ステータスに応じて pickup_called も連動
+          if (newStatus == "DONE" || newStatus == "COOKED") {
+            o.cooked = true;
+            o.pickup_called = true;
+            notifyType = "order.cooked";
+            Serial.printf("  → 互換処理: pickup_called=true (呼び出し画面に追加)\n");
+          } else if (newStatus == "READY" || newStatus == "PICKED") {
+            o.picked_up = true;
+            o.pickup_called = false;
+            notifyType = "order.picked";
+            Serial.printf("  → 互換処理: pickup_called=false (呼び出し画面から削除)\n");
+          }
+          
+          break;
+        }
+      }
+      
       if (!found) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
 
       walAppend("ORDER_UPDATE," + orderNo + "," + newStatus);
       snapshotSave();
 
-      JsonDocument notify; notify["type"]="order.updated"; notify["orderNo"]=orderNo; notify["status"]=newStatus;
-      String msg; serializeJson(notify, msg); wsBroadcast(msg);
+      // 互換性レイヤー: 適切なイベントタイプで通知
+      JsonDocument notify; 
+      notify["type"] = notifyType;
+      notify["orderNo"] = orderNo; 
+      notify["status"] = newStatus;
+      String msg; serializeJson(notify, msg); 
+      wsBroadcast(msg);
+
+      Serial.printf("  ✅ WebSocket通知送信: type=%s\n", notifyType.c_str());
 
       JsonDocument res; res["ok"]=true; String out; serializeJson(res, out);
       request->send(200, "application/json", out);
     });
+
+  // POST /api/orders/:id/cooked - 調理済み→呼び出し画面へ
+  server.on("^\\/api\\/orders\\/([0-9]+)\\/cooked$", HTTP_POST, [](AsyncWebServerRequest *request) {
+    String path = request->url();
+    Serial.printf("[API] POST リクエスト受信: %s\n", path.c_str());
+    
+    // URLからorderNoを抽出 (/api/orders/0001/cooked → 0001)
+    int startIdx = path.indexOf("/orders/") + 8;
+    int endIdx = path.indexOf("/cooked");
+    String orderNo = path.substring(startIdx, endIdx);
+    
+    Serial.printf("[API] 抽出された注文番号: %s\n", orderNo.c_str());
+    
+    bool found = false;
+    for (auto& o : S().orders) {
+      if (o.orderNo == orderNo) {
+        o.cooked = true;
+        o.pickup_called = true;
+        found = true;
+        Serial.printf("  ✅ 注文 %s を調理済みにマークしました\n", orderNo.c_str());
+        break;
+      }
+    }
+    if (!found) { 
+      Serial.printf("  ❌ エラー: 注文 %s が見つかりません\n", orderNo.c_str());
+      request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
+      return; 
+    }
+    
+    walAppend("ORDER_COOKED," + orderNo);
+    snapshotSave();
+    
+    JsonDocument notify;
+    notify["type"] = "order.cooked";
+    notify["orderNo"] = orderNo;
+    String msg; serializeJson(notify, msg);
+    wsBroadcast(msg);
+    
+    request->send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // POST /api/orders/:id/picked - 品出し済み→呼び出し画面から削除
+  server.on("^\\/api\\/orders\\/([0-9]+)\\/picked$", HTTP_POST, [](AsyncWebServerRequest *request) {
+    String path = request->url();
+    Serial.printf("[API] POST リクエスト受信: %s\n", path.c_str());
+    
+    // URLからorderNoを抽出 (/api/orders/0001/picked → 0001)
+    int startIdx = path.indexOf("/orders/") + 8;
+    int endIdx = path.indexOf("/picked");
+    String orderNo = path.substring(startIdx, endIdx);
+    
+    Serial.printf("[API] 抽出された注文番号: %s\n", orderNo.c_str());
+    
+    bool found = false;
+    for (auto& o : S().orders) {
+      if (o.orderNo == orderNo) {
+        o.picked_up = true;
+        o.pickup_called = false;
+        found = true;
+        Serial.printf("  ✅ 注文 %s を品出し済みにマークしました\n", orderNo.c_str());
+        break;
+      }
+    }
+    if (!found) { 
+      Serial.printf("  ❌ エラー: 注文 %s が見つかりません\n", orderNo.c_str());
+      request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
+      return; 
+    }
+    
+    walAppend("ORDER_PICKED," + orderNo);
+    snapshotSave();
+    
+    JsonDocument notify;
+    notify["type"] = "order.picked";
+    notify["orderNo"] = orderNo;
+    String msg; serializeJson(notify, msg);
+    wsBroadcast(msg);
+    
+    request->send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // GET /api/call-list - 呼び出し中の注文一覧
+  server.on("/api/call-list", HTTP_GET, [](AsyncWebServerRequest *request) {
+    JsonDocument doc;
+    JsonArray list = doc["callList"].to<JsonArray>();
+    
+    for (const auto& o : S().orders) {
+      if (o.pickup_called) {
+        JsonObject item = list.add<JsonObject>();
+        item["orderNo"] = o.orderNo;
+        item["ts"] = o.ts;
+      }
+    }
+    
+    String res; serializeJson(doc, res);
+    request->send(200, "application/json", res);
+  });
 
   // POST /api/time/set
   server.on("/api/time/set", HTTP_POST, [](AsyncWebServerRequest *request){},
@@ -684,6 +874,24 @@ void initHttpRoutes(AsyncWebServer &server) {
       "<script>const btn=document.getElementById('btn');const log=document.getElementById('log');btn.onclick=async()=>{btn.disabled=true;log.textContent='Requesting /api/print/hello ...\\n';try{const r=await fetch('/api/print/hello');const t=await r.text();log.textContent+='HTTP '+r.status+'\\n'+t;}catch(e){log.textContent+='ERROR: '+e;}btn.disabled=false;};</script>"
       "</body></html>";
     request->send(200, "text/html; charset=UTF-8", html);
+  });
+
+  // デバッグ用：すべてのAPIリクエストをログ
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    String method = (request->method() == HTTP_GET) ? "GET" : 
+                   (request->method() == HTTP_POST) ? "POST" : 
+                   (request->method() == HTTP_PUT) ? "PUT" : 
+                   (request->method() == HTTP_DELETE) ? "DELETE" : "OTHER";
+    Serial.printf("[404] %s %s\n", method.c_str(), request->url().c_str());
+    
+    // 注文関連のAPIの場合は詳細ログ
+    if (request->url().indexOf("/api/orders/") >= 0) {
+      Serial.println("  ⚠️ 注文関連APIがマッチしませんでした");
+      Serial.printf("  URL: %s\n", request->url().c_str());
+      Serial.printf("  Method: %s\n", method.c_str());
+    }
+    
+    request->send(404, "application/json", "{\"error\":\"Not Found\"}");
   });
 
   Serial.println("HTTP API ルート初期化完了");

@@ -280,12 +280,20 @@ int PrinterRenderer::drawStoreName(M5Canvas& sp, const String& name, int y) {
 }
 
 int PrinterRenderer::drawOrderNumber(M5Canvas& sp, const String& orderNo, int y) {
-  sp.setTextDatum(textdatum_t::top_left);
+  // 注文番号を特大表示（サイズ4、太字、中央寄せ）
+  sp.setTextDatum(textdatum_t::top_center);
   sp.setTextColor(TFT_BLACK, TFT_WHITE);
   sp.setFont(&fonts::Font7);
-  sp.setTextSize(3);
-  sp.drawString("Order No. " + orderNo, 10, y);
-  return y + 48 + 8;
+  sp.setTextSize(4); // サイズを3→4へアップ
+  
+  // 上下に余白を追加
+  y += 10;
+  sp.drawString("Order No.", DOT_WIDTH/2, y);
+  y += 56; // フォントサイズに合わせて調整
+  sp.drawString(orderNo, DOT_WIDTH/2, y);
+  y += 56 + 10; // 下余白
+  
+  return y + 8;
 }
 
 int PrinterRenderer::drawSeparator(M5Canvas& sp, int y) {
@@ -458,12 +466,16 @@ bool PrinterRenderer::printReceiptJP(const Order& order) {
 
   int total = 0;
   for (const auto& it : order.items) {
-    if (it.kind == "ADJUST") continue;
-
+    // 調整行（ちんちろ等）も印刷対象に含める
     String romaji = it.name;
-    for (const auto& m : S().menu) {
-      if (m.sku == it.sku || m.name == it.name) { romaji = m.nameRomaji; break; }
+    
+    // ADJUST以外はメニューからローマ字名を引く
+    if (it.kind != "ADJUST") {
+      for (const auto& m : S().menu) {
+        if (m.sku == it.sku || m.name == it.name) { romaji = m.nameRomaji; break; }
+      }
     }
+    
     int unit = (it.unitPriceApplied > 0) ? it.unitPriceApplied : it.unitPrice;
     int qty  = it.qty > 0 ? it.qty : 1;
     int sub  = unit * qty - (it.discountValue > 0 ? it.discountValue : 0);
@@ -626,7 +638,14 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
   sendLine(toASCII(od.storeName));
   sendLine("==============================");
   sendLine("");
+  
+  // 注文番号を特大表示（GS ! n で 2倍幅×2倍高）
+  const uint8_t D_W_H[] = {0x1D, 0x21, 0x11};  // GS ! 0x11 (2x width, 2x height)
+  const uint8_t D_RESET[] = {0x1D, 0x21, 0x00}; // GS ! 0x00 (reset to normal)
+  _sendBytesChecked(printerSerial_, D_W_H, sizeof(D_W_H), "GS ! 0x11 (double size)");
   sendLine("Order No. " + toASCII(od.orderNo));
+  _sendBytesChecked(printerSerial_, D_RESET, sizeof(D_RESET), "GS ! 0x00 (reset size)");
+  
   sendLine("------------------------------");
   const size_t n = od.itemsRomaji.size();
   for (size_t i=0; i<n; ++i) {
@@ -658,12 +677,14 @@ bool PrinterRenderer::printReceiptEN(const Order& order) {
 
   int total = 0;
   for (const auto& it : order.items) {
-    if (it.kind == "ADJUST") continue; // 調整行はスキップ
-
-    // メニューからローマ字名を引く（SKU または表示名で一致）
+    // 調整行（ちんちろ等）も印刷対象に含める
     String romaji = it.name;
-    for (const auto& m : S().menu) {
-      if (m.sku == it.sku || m.name == it.name) { romaji = m.nameRomaji; break; }
+    
+    // ADJUST以外はメニューからローマ字名を引く
+    if (it.kind != "ADJUST") {
+      for (const auto& m : S().menu) {
+        if (m.sku == it.sku || m.name == it.name) { romaji = m.nameRomaji; break; }
+      }
     }
 
     int unit = (it.unitPriceApplied > 0) ? it.unitPriceApplied : it.unitPrice;

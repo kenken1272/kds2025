@@ -97,6 +97,7 @@ Order buildOrderFromClientJson(const JsonDocument& req){
                      lm.name.c_str(), lm.qty, lm.unitPriceApplied, lm.kind.c_str());
 
         // sideSkus
+        int setSubtotal = base; // MAIN価格を初期値として設定
         if (v["sideSkus"].is<JsonArray>()) {
           JsonArray sides = v["sideSkus"].as<JsonArray>();
           Serial.printf("sideSkus処理開始 - サイズ: %d\n", sides.size());
@@ -118,12 +119,73 @@ Order buildOrderFromClientJson(const JsonDocument& req){
             ls.sku = sideSku; ls.name = side->name; ls.qty = qty; ls.kind = "SIDE_AS_SET"; ls.priceMode = "";
             ls.unitPriceApplied = ls.unitPrice = side->price_as_side;
             o.items.push_back(ls);
+            setSubtotal += side->price_as_side; // SETの小計に加算
             Serial.printf("SIDE追加: %s x%d (%d円) [%s]\n", 
                          ls.name.c_str(), ls.qty, ls.unitPriceApplied, ls.kind.c_str());
           }
         } else {
           Serial.println("sideSkus配列が存在しないかNULL");
         }
+        
+        // ちんちろ調整（SET商品のみ）
+        if (S().settings.chinchiro.enabled && v["chinchoiroMultiplier"].is<float>()) {
+          float multiplier = v["chinchoiroMultiplier"].as<float>();
+          const char* resultCStr = v["chinchoiroResult"] | "";
+          String result = String(resultCStr);
+          
+          if (multiplier != 1.0f) {
+            int adjustment = calculateChinchoiroAdjustment(setSubtotal, multiplier, S().settings.chinchiro.rounding);
+            
+            if (adjustment != 0) {
+              LineItem adj;
+              adj.sku = "CHINCHIRO_ADJUST";
+              adj.name = String("Chinchiro (") + result + ")";
+              adj.qty = qty;
+              adj.kind = "ADJUST";
+              adj.priceMode = "";
+              adj.unitPriceApplied = adj.unitPrice = adjustment;
+              adj.discountValue = 0;
+              o.items.push_back(adj);
+              Serial.printf("ちんちろ調整追加: %s (%d円 × %d) [倍率: %.2f]\n", 
+                           adj.name.c_str(), adjustment, qty, multiplier);
+            }
+          }
+        }
+      }
+      else if (strcmp(type, "MAIN_SINGLE") == 0){
+        // メイン商品単品
+        const char* mainSkuCStr = v["mainSku"] | "";
+        const char* pmCStr = v["priceMode"] | "normal";
+        String mainSku = String(mainSkuCStr);
+        String pm = String(pmCStr);
+        
+        Serial.printf("MAIN_SINGLE処理開始 - mainSku: %s, priceMode: %s, qty: %d\n", 
+                     mainSku.c_str(), pm.c_str(), qty);
+        
+        auto main = findMenu(mainSku);
+        if(!main) {
+          Serial.printf("エラー: メニューが見つからない: %s\n", mainSku.c_str());
+          continue;
+        }
+        if(main->category != "MAIN") {
+          Serial.printf("エラー: カテゴリがMAINでない: %s (category: %s)\n", 
+                       mainSku.c_str(), main->category.c_str());
+          continue;
+        }
+        
+        LineItem lm;
+        lm.sku = mainSku; 
+        lm.name = main->name; 
+        lm.qty = qty; 
+        lm.kind = "MAIN_SINGLE";
+        lm.priceMode = (pm == "presale") ? "presale" : "normal";
+        int base = (lm.priceMode=="presale" && main->price_presale>0)
+          ? main->price_presale
+          : (main->price_normal + (lm.priceMode=="presale" ? main->presale_discount_amount : 0));
+        lm.unitPriceApplied = lm.unitPrice = base;
+        o.items.push_back(lm);
+        Serial.printf("MAIN_SINGLE追加: %s x%d (%d円) [%s]\n", 
+                     lm.name.c_str(), lm.qty, lm.unitPriceApplied, lm.kind.c_str());
       }
       else if (strcmp(type, "SIDE_SINGLE") == 0){
         const char* sideSkuCStr = v["sideSku"] | "";

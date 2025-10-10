@@ -89,6 +89,9 @@ String generateSkuSide() {
 static bool currentSnapshotIsA = true;
 
 bool snapshotSave() {
+    Serial.printf("=== snapshotSave開始: 注文数=%d, メニュー数=%d ===\n", 
+                  S().orders.size(), S().menu.size());
+    
     // ディレクトリ作成（存在しない場合）
     if (!LittleFS.exists("/kds")) {
         if (!LittleFS.mkdir("/kds")) {
@@ -150,6 +153,14 @@ bool snapshotSave() {
         orderObj["ts"] = order.ts;
         orderObj["printed"] = order.printed;
         orderObj["cancelReason"] = order.cancelReason;
+        // 追加: 呼び出し画面関連フラグを保存
+        orderObj["cooked"] = order.cooked;
+        orderObj["picked_up"] = order.picked_up;
+        orderObj["pickup_called"] = order.pickup_called;
+        
+        Serial.printf("  注文 %s: status=%s, cooked=%d, picked_up=%d, pickup_called=%d, items=%d件\n",
+                      order.orderNo.c_str(), order.status.c_str(), 
+                      order.cooked, order.picked_up, order.pickup_called, order.items.size());
         
         JsonArray itemsArray = orderObj["items"].to<JsonArray>();
         for (const auto& item : order.items) {
@@ -287,6 +298,10 @@ bool snapshotLoad() {
             order.ts = v["ts"] | 0;
             order.printed = v["printed"] | false;
             order.cancelReason = v["cancelReason"] | "";
+            // 追加: 呼び出し画面関連フラグを復元
+            order.cooked = v["cooked"] | false;
+            order.picked_up = v["picked_up"] | false;
+            order.pickup_called = v["pickup_called"] | false;
             
             if (v["items"].is<JsonArray>()) {
                 for (JsonVariantConst iv : v["items"].as<JsonArrayConst>()) {
@@ -303,11 +318,17 @@ bool snapshotLoad() {
                     order.items.push_back(item);
                 }
             }
+            
+            Serial.printf("  復元: 注文 %s: status=%s, cooked=%d, picked_up=%d, pickup_called=%d, items=%d件\n",
+                          order.orderNo.c_str(), order.status.c_str(), 
+                          order.cooked, order.picked_up, order.pickup_called, order.items.size());
+            
             S().orders.push_back(order);
         }
     }
     
     Serial.printf("スナップショット読込完了: %s\n", filename.c_str());
+    Serial.printf("復元されたデータ: 注文数=%d件, メニュー数=%d件\n", S().orders.size(), S().menu.size());
     
     // メニューが空の場合、初期メニューを投入
     if (S().menu.empty()) {
@@ -347,11 +368,18 @@ bool walAppend(const String& line) {
 }
 
 bool recoverToLatest(String &outLastTs) {
+    Serial.println("=== recoverToLatest開始 ===");
+    
     // まずスナップショット読込
+    Serial.println("スナップショット読み込み中...");
     if (!snapshotLoad()) {
         outLastTs = "snapshot load failed";
+        Serial.println("エラー: スナップショット読み込み失敗");
         return false;
     }
+    
+    Serial.printf("スナップショット読み込み成功: 注文数=%d, メニュー数=%d\n", 
+                  S().orders.size(), S().menu.size());
     
     // WAL適用
     File walFile = LittleFS.open("/kds/wal.log", "r");

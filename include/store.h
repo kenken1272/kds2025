@@ -72,6 +72,9 @@ struct Order {
     String status;            // COOKING|DONE|CANCELLED
     uint32_t ts{0};           // epoch秒
     bool printed{false};
+    bool cooked{false};       // 調理済みフラグ
+    bool pickup_called{false}; // 呼び出し中（呼び出し画面に表示中）
+    bool picked_up{false};    // 品出し済み（受け渡し完了）
     String cancelReason;
     std::vector<LineItem> items;
 };
