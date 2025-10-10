@@ -189,6 +189,28 @@ function setupNavigation() {
     document.querySelector(`[data-page="${state.page}"]`).classList.add('active');
 }
 
+// ページ切り替え関数
+function navigateTo(page) {
+    state.page = page;
+    
+    // ナビゲーションバーのアクティブ状態更新
+    const navBtns = document.querySelectorAll('.nav-btn');
+    navBtns.forEach(btn => {
+        if (btn.dataset.page === page) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+    
+    // 呼び出し画面に切り替える場合は最新データを取得
+    if (page === 'call') {
+        loadCallList().then(() => render());
+    } else {
+        render();
+    }
+}
+
 // WebSocket接続
 function connectWs() {
     const wsUrl = `ws://${location.host}/ws`;
@@ -341,6 +363,16 @@ function render() {
     }
     
     app.innerHTML = content;
+    
+    // 呼び出し画面ではナビゲーションバーを非表示
+    const nav = document.querySelector('nav.nav');
+    if (nav) {
+        if (state.page === 'call') {
+            nav.style.display = 'none';
+        } else {
+            nav.style.display = 'flex';
+        }
+    }
     
     // 紙切れモーダル確認
     updatePaperOutModal();
@@ -536,9 +568,6 @@ function renderPickupPage() {
         <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                 <h2>品出し画面 (${pickupOrders.length}件)</h2>
-                <button class="btn btn-secondary" onclick="testPickupApi()" style="font-size: 0.9em;">
-                    🔧 API接続テスト
-                </button>
             </div>
             <div class="grid">
                 ${pickupOrders.map(order => {
@@ -908,18 +937,21 @@ function renderCallPage() {
         <div class="call-screen">
             ${hasOrders ? `
                 <div class="call-header">
-                    <h1>お呼び出し</h1>
+                    <h1 onclick="navigateTo('order')" style="cursor: pointer; user-select: none;">お呼び出し</h1>
                 </div>
                 <div class="call-grid" id="call-grid">
                     ${items}
                 </div>
             ` : `
                 <div class="call-empty" id="call-empty">
-                    <h1>お待ちください</h1>
+                    <h1 onclick="navigateTo('order')" style="cursor: pointer; user-select: none;">お待ちください</h1>
                     <p>現在、呼び出し中の注文はありません</p>
                 </div>
             `}
-            <div class="call-time"></div>
+            <div class="call-footer" style="position: fixed; bottom: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: rgba(0,0,0,0.8);">
+                <div class="call-time" style="color: white; font-size: 1.2em;"></div>
+                <button onclick="navigateTo('order')" style="background: rgba(100, 149, 237, 0.3); border: none; color: transparent; width: 60px; height: 40px; border-radius: 5px; cursor: pointer;">nav</button>
+            </div>
         </div>
     `;
 }
@@ -953,7 +985,7 @@ function updateCallScreen() {
             // 空表示からグリッド表示に切り替え
             callEmpty.outerHTML = `
                 <div class="call-header">
-                    <h1>お呼び出し</h1>
+                    <h1 onclick="navigateTo('order')" style="cursor: pointer; user-select: none;">お呼び出し</h1>
                 </div>
                 <div class="call-grid" id="call-grid">
                     ${items}
@@ -968,7 +1000,7 @@ function updateCallScreen() {
             if (header) header.remove();
             callGrid.outerHTML = `
                 <div class="call-empty" id="call-empty">
-                    <h1>お待ちください</h1>
+                    <h1 onclick="navigateTo('order')" style="cursor: pointer; user-select: none;">お待ちください</h1>
                     <p>現在、呼び出し中の注文はありません</p>
                 </div>
             `;
@@ -1047,81 +1079,6 @@ function handlePickupButtonClick(event) {
         }
     }
 }
-
-// 品出し画面API接続テスト
-window.testPickupApi = async function() {
-    console.log('=== 品出し画面 API接続テスト開始 ===');
-    
-    let testResults = '【接続テスト結果】\n\n';
-    
-    // テスト1: Ping
-    try {
-        console.log('テスト1: /api/ping');
-        const pingStart = Date.now();
-        const pingResponse = await fetch('/api/ping');
-        const pingTime = Date.now() - pingStart;
-        const pingData = await pingResponse.json();
-        
-        console.log(`  ✅ Ping成功 (${pingTime}ms):`, pingData);
-        testResults += `✅ Ping: OK (${pingTime}ms)\n`;
-        testResults += `   サーバーIP: ${pingData.ip || 'N/A'}\n\n`;
-    } catch (error) {
-        console.error('  ❌ Ping失敗:', error);
-        testResults += `❌ Ping: 失敗\n`;
-        testResults += `   エラー: ${error.message}\n\n`;
-        alert(testResults + '\n⚠️ サーバーとの接続に失敗しました');
-        return;
-    }
-    
-    // テスト2: 注文一覧の取得
-    try {
-        console.log('テスト2: /api/state');
-        const response = await fetch('/api/state');
-        const data = await response.json();
-        console.log('  ✅ /api/state 成功:', data.orders.length, '件の注文');
-        testResults += `✅ State: OK\n`;
-        testResults += `   注文数: ${data.orders.length}件\n\n`;
-        
-        const pickupOrders = data.orders.filter(o => 
-            (o.status === 'COOKING' || o.status === 'DONE') && !o.picked_up
-        );
-        console.log('  品出し対象:', pickupOrders.length, '件');
-        testResults += `品出し対象: ${pickupOrders.length}件\n\n`;
-        
-        if (pickupOrders.length > 0) {
-            const testOrder = pickupOrders[0];
-            console.log('  テスト対象注文:', testOrder.orderNo);
-            
-            // テスト3: 調理済みURL構築テスト
-            const cookedUrl = `/api/orders/${testOrder.orderNo}/cooked`;
-            const fullCookedUrl = `${window.location.origin}${cookedUrl}`;
-            console.log(`  調理済みURL: ${cookedUrl}`);
-            console.log(`  完全URL: ${fullCookedUrl}`);
-            testResults += `【テスト用URL】\n`;
-            testResults += `注文番号: ${testOrder.orderNo}\n`;
-            testResults += `調理済み: ${cookedUrl}\n`;
-            testResults += `品出し済み: /api/orders/${testOrder.orderNo}/picked\n\n`;
-            
-            // テスト4: 実際のPOSTリクエストテスト（注意: 実際に実行されます）
-            testResults += `⚠️ 実際のAPIを呼び出す場合は\nコンソールから以下を実行:\n`;
-            testResults += `updateOrderStatus('${testOrder.orderNo}', 'DONE') // 調理完了\n`;
-            testResults += `updateOrderStatus('${testOrder.orderNo}', 'READY') // 品出し完了\n`;
-            
-            alert(testResults);
-        } else {
-            testResults += '⚠️ 品出し対象の注文がありません\n';
-            testResults += '新しい注文を作成してからテストしてください';
-            alert(testResults);
-        }
-    } catch (error) {
-        console.error('❌ API接続テスト失敗:', error);
-        testResults += `❌ State取得: 失敗\n`;
-        testResults += `エラー: ${error.message}`;
-        alert(testResults);
-    }
-    
-    console.log('=== 品出し画面 API接続テスト終了 ===');
-};
 
 // 呼び出しリストをAPIから取得
 async function loadCallList() {

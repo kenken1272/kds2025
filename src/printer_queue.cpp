@@ -45,11 +45,7 @@ String formatOrderTicket(const Order& order) {
     int total = 0;
     Serial.printf("Item details:\n");
     for (const auto& item : order.items) {
-        if (item.kind == "ADJUST") {
-            Serial.printf("Skip adjustment row: %s\n", item.name.c_str());
-            continue; // Exclude adjustment rows
-        }
-        
+        // ADJUSTも印刷対象に含める（ちんちろ調整等）
         Serial.printf("- %s: qty=%d, price=%d, kind=%s\n", 
                      item.name.c_str(), item.qty, item.unitPriceApplied, item.kind.c_str());
         

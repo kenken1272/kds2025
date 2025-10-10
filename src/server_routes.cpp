@@ -227,6 +227,8 @@ void initHttpRoutes(AsyncWebServer &server) {
   server.on("/api/orders", HTTP_POST, [](AsyncWebServerRequest *request){},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
+      Serial.printf("[API] POST /api/orders - URL=%s\n", request->url().c_str());
+      
       JsonDocument doc;
       if (deserializeJson(doc, (char*)data, len)) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
