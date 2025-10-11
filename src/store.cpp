@@ -4,6 +4,8 @@
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
+#include <algorithm>
+#include <cstdlib>
 
 static State g_state;
 
@@ -79,6 +81,110 @@ String generateSkuSide() {
     return sku;
 }
 
+Order* findOrderByNo(const String& orderNo) {
+    for (auto& order : S().orders) {
+        if (order.orderNo == orderNo) {
+            return &order;
+        }
+    }
+    return nullptr;
+}
+
+int computeOrderTotal(const Order& order) {
+    int total = 0;
+    for (const auto& item : order.items) {
+        total += item.unitPriceApplied * item.qty;
+        total -= item.discountValue;
+    }
+    return total;
+}
+
+void orderToJson(JsonObject json, const Order& order) {
+    if (!json) return;
+
+    json["orderNo"] = order.orderNo;
+    json["status"] = order.status;
+    json["ts"] = order.ts;
+    json["printed"] = order.printed;
+    json["cooked"] = order.cooked;
+    json["pickup_called"] = order.pickup_called;
+    json["picked_up"] = order.picked_up;
+    if (!order.cancelReason.isEmpty()) {
+        json["cancelReason"] = order.cancelReason;
+    } else if (json.containsKey("cancelReason")) {
+        json.remove("cancelReason");
+    }
+
+    if (json.containsKey("items")) {
+        json.remove("items");
+    }
+    JsonArray items = json.createNestedArray("items");
+    for (const auto& item : order.items) {
+        JsonObject itemObj = items.add<JsonObject>();
+        itemObj["sku"] = item.sku;
+        itemObj["name"] = item.name;
+        itemObj["qty"] = item.qty;
+        itemObj["unitPriceApplied"] = item.unitPriceApplied;
+        itemObj["priceMode"] = item.priceMode;
+        itemObj["kind"] = item.kind;
+        itemObj["unitPrice"] = item.unitPrice;
+        if (!item.discountName.isEmpty()) {
+            itemObj["discountName"] = item.discountName;
+        } else if (itemObj.containsKey("discountName")) {
+            itemObj.remove("discountName");
+        }
+        itemObj["discountValue"] = item.discountValue;
+    }
+
+    json["total"] = computeOrderTotal(order);
+}
+
+bool orderFromJson(JsonVariantConst json, Order& order) {
+    if (!json.is<JsonObject>()) {
+        return false;
+    }
+
+    JsonObjectConst obj = json.as<JsonObjectConst>();
+    String orderNo = obj["orderNo"] | "";
+    if (orderNo.isEmpty()) {
+        return false;
+    }
+
+    order.orderNo = orderNo;
+    order.status = obj["status"] | String("COOKING");
+    order.ts = obj["ts"] | 0;
+    order.printed = obj["printed"] | false;
+    order.cooked = obj["cooked"] | false;
+    order.pickup_called = obj["pickup_called"] | false;
+    order.picked_up = obj["picked_up"] | false;
+    order.cancelReason = obj["cancelReason"] | String("");
+
+    order.items.clear();
+    if (obj["items"].is<JsonArrayConst>()) {
+        for (JsonVariantConst itemVar : obj["items"].as<JsonArrayConst>()) {
+            if (!itemVar.is<JsonObjectConst>()) {
+                continue;
+            }
+            JsonObjectConst itemObj = itemVar.as<JsonObjectConst>();
+            LineItem li;
+            li.sku = itemObj["sku"] | String("");
+            li.name = itemObj["name"] | String("");
+            li.qty = itemObj["qty"] | 1;
+            li.unitPriceApplied = itemObj["unitPriceApplied"] | 0;
+            li.priceMode = itemObj["priceMode"] | String("");
+            li.kind = itemObj["kind"] | String("");
+            li.unitPrice = itemObj["unitPrice"] | 0;
+            li.discountName = itemObj["discountName"] | String("");
+            li.discountValue = itemObj["discountValue"] | 0;
+            order.items.push_back(li);
+        }
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
 static bool currentSnapshotIsA = true;
 
 bool snapshotSave() {
@@ -135,32 +241,11 @@ bool snapshotSave() {
     JsonArray ordersArray = doc["orders"].to<JsonArray>();
     for (const auto& order : S().orders) {
         JsonObject orderObj = ordersArray.add<JsonObject>();
-        orderObj["orderNo"] = order.orderNo;
-        orderObj["status"] = order.status;
-        orderObj["ts"] = order.ts;
-        orderObj["printed"] = order.printed;
-        orderObj["cancelReason"] = order.cancelReason;
-        orderObj["cooked"] = order.cooked;
-        orderObj["picked_up"] = order.picked_up;
-        orderObj["pickup_called"] = order.pickup_called;
-        
+        orderToJson(orderObj, order);
+
         Serial.printf("  注文 %s: status=%s, cooked=%d, picked_up=%d, pickup_called=%d, items=%d件\n",
                       order.orderNo.c_str(), order.status.c_str(), 
                       order.cooked, order.picked_up, order.pickup_called, order.items.size());
-        
-        JsonArray itemsArray = orderObj["items"].to<JsonArray>();
-        for (const auto& item : order.items) {
-            JsonObject itemObj = itemsArray.add<JsonObject>();
-            itemObj["sku"] = item.sku;
-            itemObj["name"] = item.name;
-            itemObj["qty"] = item.qty;
-            itemObj["unitPriceApplied"] = item.unitPriceApplied;
-            itemObj["priceMode"] = item.priceMode;
-            itemObj["kind"] = item.kind;
-            itemObj["unitPrice"] = item.unitPrice;
-            itemObj["discountName"] = item.discountName;
-            itemObj["discountValue"] = item.discountValue;
-        }
     }
     
     String filename = currentSnapshotIsA ? "/kds/snapA.json" : "/kds/snapB.json";
@@ -271,35 +356,38 @@ bool snapshotLoad() {
     if (doc["orders"].is<JsonArray>()) {
         for (JsonVariantConst v : doc["orders"].as<JsonArrayConst>()) {
             Order order;
-            order.orderNo = v["orderNo"] | "";
-            order.status = v["status"] | "";
-            order.ts = v["ts"] | 0;
-            order.printed = v["printed"] | false;
-            order.cancelReason = v["cancelReason"] | "";
-            order.cooked = v["cooked"] | false;
-            order.picked_up = v["picked_up"] | false;
-            order.pickup_called = v["pickup_called"] | false;
-            
-            if (v["items"].is<JsonArray>()) {
-                for (JsonVariantConst iv : v["items"].as<JsonArrayConst>()) {
-                    LineItem item;
-                    item.sku = iv["sku"] | "";
-                    item.name = iv["name"] | "";
-                    item.qty = iv["qty"] | 1;
-                    item.unitPriceApplied = iv["unitPriceApplied"] | 0;
-                    item.priceMode = iv["priceMode"] | "";
-                    item.kind = iv["kind"] | "";
-                    item.unitPrice = iv["unitPrice"] | 0;
-                    item.discountName = iv["discountName"] | "";
-                    item.discountValue = iv["discountValue"] | 0;
-                    order.items.push_back(item);
+            bool parsed = orderFromJson(v, order);
+            if (!parsed) {
+                order.orderNo = v["orderNo"] | "";
+                order.status = v["status"] | "";
+                order.ts = v["ts"] | 0;
+                order.printed = v["printed"] | false;
+                order.cancelReason = v["cancelReason"] | "";
+                order.cooked = v["cooked"] | false;
+                order.picked_up = v["picked_up"] | false;
+                order.pickup_called = v["pickup_called"] | false;
+
+                if (v["items"].is<JsonArray>()) {
+                    for (JsonVariantConst iv : v["items"].as<JsonArrayConst>()) {
+                        LineItem item;
+                        item.sku = iv["sku"] | "";
+                        item.name = iv["name"] | "";
+                        item.qty = iv["qty"] | 1;
+                        item.unitPriceApplied = iv["unitPriceApplied"] | 0;
+                        item.priceMode = iv["priceMode"] | "";
+                        item.kind = iv["kind"] | "";
+                        item.unitPrice = iv["unitPrice"] | 0;
+                        item.discountName = iv["discountName"] | "";
+                        item.discountValue = iv["discountValue"] | 0;
+                        order.items.push_back(item);
+                    }
                 }
             }
-            
+
             Serial.printf("  復元: 注文 %s: status=%s, cooked=%d, picked_up=%d, pickup_called=%d, items=%d件\n",
                           order.orderNo.c_str(), order.status.c_str(), 
                           order.cooked, order.picked_up, order.pickup_called, order.items.size());
-            
+
             S().orders.push_back(order);
         }
     }
@@ -317,6 +405,270 @@ bool snapshotLoad() {
     return true;
 }
 
+static bool isWalLogPath(const String& path) {
+    String name = path;
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) {
+        name = name.substring(slash + 1);
+    }
+    if (name == "wal.log") {
+        return true;
+    }
+    if (name.startsWith("wal.") && name.endsWith(".log")) {
+        return true;
+    }
+    return false;
+}
+
+static uint32_t walSortKey(const String& path) {
+    String name = path;
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) {
+        name = name.substring(slash + 1);
+    }
+
+    if (name == "wal.log") {
+        return 0xFFFFFFFFu;
+    }
+    if (name.startsWith("wal.") && name.endsWith(".log")) {
+        String tsPart = name.substring(4, name.length() - 4);
+        uint32_t value = static_cast<uint32_t>(strtoul(tsPart.c_str(), nullptr, 10));
+        return value;
+    }
+    return 0xFFFFFFFEu;
+}
+
+static std::vector<String> listWalFilesForRecovery() {
+    std::vector<String> result;
+    File dir = LittleFS.open("/kds");
+    if (!dir) {
+        return result;
+    }
+
+    while (true) {
+        File file = dir.openNextFile();
+        if (!file) {
+            break;
+        }
+
+        String fname = String(file.name());
+        file.close();
+        if (fname.length() == 0) {
+            continue;
+        }
+
+        if (!fname.startsWith("/")) {
+            fname = String("/kds/") + fname;
+        }
+
+        if (isWalLogPath(fname)) {
+            result.push_back(fname);
+        }
+    }
+
+    dir.close();
+
+    std::sort(result.begin(), result.end(), [](const String& a, const String& b) {
+        uint32_t ka = walSortKey(a);
+        uint32_t kb = walSortKey(b);
+        if (ka == kb) {
+            return a.compareTo(b) < 0;
+        }
+        return ka < kb;
+    });
+
+    return result;
+}
+
+static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, String& lastTimestamp, int& entriesApplied) {
+    while (walFile.available()) {
+        String line = walFile.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0) {
+            continue;
+        }
+
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, line);
+        if (error) {
+            Serial.printf("[RECOVER] JSON解析エラー、スキップ (%s): %s\n", sourceLabel.c_str(), line.c_str());
+            continue;
+        }
+
+        uint32_t ts = doc["ts"] | 0;
+        String action = doc["action"] | "";
+        if (action.isEmpty()) {
+            Serial.printf("[RECOVER] action不明、スキップ (%s): %s\n", sourceLabel.c_str(), line.c_str());
+            continue;
+        }
+
+        lastTimestamp = String(ts);
+        bool appliedEntry = false;
+
+        if (action == "ORDER_CREATE") {
+            Order restored;
+            bool parsed = false;
+            if (doc["order"].is<JsonObject>()) {
+                parsed = orderFromJson(doc["order"], restored);
+            }
+            if (!parsed) {
+                restored.orderNo = doc["orderNo"] | String("");
+                if (!restored.orderNo.isEmpty()) {
+                    restored.status = doc["status"] | String("PENDING");
+                    restored.ts = doc["orderTs"] | (uint32_t)(doc["ts"] | 0);
+                    restored.printed = doc["printed"] | false;
+                    restored.cooked = doc["cooked"] | false;
+                    restored.pickup_called = doc["pickup_called"] | false;
+                    restored.picked_up = doc["picked_up"] | false;
+                    restored.cancelReason = doc["cancelReason"] | String("");
+                    restored.items.clear();
+                    if (doc["items"].is<JsonArrayConst>()) {
+                        for (JsonVariantConst itemVar : doc["items"].as<JsonArrayConst>()) {
+                            if (!itemVar.is<JsonObjectConst>()) {
+                                continue;
+                            }
+                            JsonObjectConst itemObj = itemVar.as<JsonObjectConst>();
+                            LineItem item;
+                            item.sku = itemObj["sku"] | String("");
+                            item.name = itemObj["name"] | String("");
+                            item.qty = itemObj["qty"] | 1;
+                            item.unitPriceApplied = itemObj["unitPriceApplied"] | 0;
+                            item.priceMode = itemObj["priceMode"] | String("");
+                            item.kind = itemObj["kind"] | String("");
+                            item.unitPrice = itemObj["unitPrice"] | 0;
+                            item.discountName = itemObj["discountName"] | String("");
+                            item.discountValue = itemObj["discountValue"] | 0;
+                            restored.items.push_back(item);
+                        }
+                    }
+                    parsed = true;
+                }
+            }
+
+            if (parsed) {
+                Order* existing = findOrderByNo(restored.orderNo);
+                if (existing) {
+                    *existing = restored;
+                } else {
+                    S().orders.push_back(restored);
+                }
+                Serial.printf("[RECOVER] ORDER_CREATE (%s): %s (items=%d件)\n", sourceLabel.c_str(), restored.orderNo.c_str(), restored.items.size());
+                appliedEntry = true;
+            }
+
+        } else if (action == "ORDER_UPDATE") {
+            String orderNo = doc["orderNo"] | "";
+            if (!orderNo.isEmpty()) {
+                Order* target = findOrderByNo(orderNo);
+                if (target) {
+                    String status = doc["status"] | String(target->status);
+                    target->status = status;
+                    if (doc["cooked"].is<bool>()) target->cooked = doc["cooked"];
+                    if (doc["pickup_called"].is<bool>()) target->pickup_called = doc["pickup_called"];
+                    if (doc["picked_up"].is<bool>()) target->picked_up = doc["picked_up"];
+                    if (doc["printed"].is<bool>()) target->printed = doc["printed"];
+                    Serial.printf("[RECOVER] ORDER_UPDATE (%s): %s (status=%s)\n", sourceLabel.c_str(), orderNo.c_str(), status.c_str());
+                    appliedEntry = true;
+                }
+            }
+
+        } else if (action == "ORDER_CANCEL") {
+            String orderNo = doc["orderNo"] | "";
+            Order* target = orderNo.isEmpty() ? nullptr : findOrderByNo(orderNo);
+            if (target) {
+                target->status = "CANCELLED";
+                target->cancelReason = doc["cancelReason"] | String("");
+                Serial.printf("[RECOVER] ORDER_CANCEL (%s): %s (reason=%s)\n", sourceLabel.c_str(), orderNo.c_str(), target->cancelReason.c_str());
+                appliedEntry = true;
+            }
+
+        } else if (action == "ORDER_COOKED") {
+            String orderNo = doc["orderNo"] | "";
+            Order* target = orderNo.isEmpty() ? nullptr : findOrderByNo(orderNo);
+            if (target) {
+                target->cooked = true;
+                target->pickup_called = true;
+                Serial.printf("[RECOVER] ORDER_COOKED (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
+                appliedEntry = true;
+            }
+
+        } else if (action == "ORDER_PICKED") {
+            String orderNo = doc["orderNo"] | "";
+            Order* target = orderNo.isEmpty() ? nullptr : findOrderByNo(orderNo);
+            if (target) {
+                target->picked_up = true;
+                target->pickup_called = false;
+                Serial.printf("[RECOVER] ORDER_PICKED (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
+                appliedEntry = true;
+            }
+
+        } else if (action == "SETTINGS_UPDATE") {
+            if (doc["chinchiro"].is<JsonObject>()) {
+                S().settings.chinchiro.enabled = doc["chinchiro"]["enabled"] | S().settings.chinchiro.enabled;
+                S().settings.chinchiro.rounding = doc["chinchiro"]["rounding"] | S().settings.chinchiro.rounding;
+            }
+            if (doc["qrPrint"].is<JsonObject>()) {
+                S().settings.qrPrint.enabled = doc["qrPrint"]["enabled"] | S().settings.qrPrint.enabled;
+                S().settings.qrPrint.content = doc["qrPrint"]["content"] | S().settings.qrPrint.content;
+            }
+            if (doc["store"].is<JsonObject>()) {
+                S().settings.store.name = doc["store"]["name"] | S().settings.store.name;
+                S().settings.store.nameRomaji = doc["store"]["nameRomaji"] | S().settings.store.nameRomaji;
+                S().settings.store.registerId = doc["store"]["registerId"] | S().settings.store.registerId;
+            }
+            Serial.printf("[RECOVER] SETTINGS_UPDATE (%s)\n", sourceLabel.c_str());
+            appliedEntry = true;
+
+        } else if (action == "MAIN_UPSERT" || action == "SIDE_UPSERT") {
+            String sku = doc["sku"] | "";
+            if (!sku.isEmpty()) {
+                MenuItem* existing = nullptr;
+                for (auto& m : S().menu) {
+                    if (m.sku == sku) {
+                        existing = &m;
+                        break;
+                    }
+                }
+
+                if (existing) {
+                    existing->name = doc["name"] | existing->name;
+                    existing->nameRomaji = doc["nameRomaji"] | existing->nameRomaji;
+                    existing->active = doc["active"] | existing->active;
+                    if (action == "MAIN_UPSERT") {
+                        existing->price_normal = doc["price_normal"] | existing->price_normal;
+                        existing->presale_discount_amount = doc["presale_discount_amount"] | existing->presale_discount_amount;
+                    } else {
+                        existing->price_single = doc["price_single"] | existing->price_single;
+                        existing->price_as_side = doc["price_as_side"] | existing->price_as_side;
+                    }
+                    Serial.printf("[RECOVER] %s (update, %s): %s\n", action.c_str(), sourceLabel.c_str(), sku.c_str());
+                } else {
+                    MenuItem newItem;
+                    newItem.sku = sku;
+                    newItem.name = doc["name"] | "";
+                    newItem.nameRomaji = doc["nameRomaji"] | "";
+                    newItem.category = (action == "MAIN_UPSERT") ? "MAIN" : "SIDE";
+                    newItem.active = doc["active"] | true;
+                    if (action == "MAIN_UPSERT") {
+                        newItem.price_normal = doc["price_normal"] | 0;
+                        newItem.presale_discount_amount = doc["presale_discount_amount"] | 0;
+                    } else {
+                        newItem.price_single = doc["price_single"] | 0;
+                        newItem.price_as_side = doc["price_as_side"] | 0;
+                    }
+                    S().menu.push_back(newItem);
+                    Serial.printf("[RECOVER] %s (insert, %s): %s\n", action.c_str(), sourceLabel.c_str(), sku.c_str());
+                }
+                appliedEntry = true;
+            }
+        }
+
+        if (appliedEntry) {
+            entriesApplied++;
+        }
+    }
+}
+
 bool walAppend(const String& line) {
     if (!LittleFS.exists("/kds")) {
         if (!LittleFS.mkdir("/kds")) {
@@ -325,10 +677,21 @@ bool walAppend(const String& line) {
         }
     }
     
-    File file = LittleFS.open("/kds/wal.log", FILE_APPEND);
-    if (!file) {
-        Serial.println("[WAL] ファイルオープン失敗");
-        return false;
+    const char* walPath = "/kds/wal.log";
+
+    File file;
+    if (LittleFS.exists(walPath)) {
+        file = LittleFS.open(walPath, FILE_APPEND);
+        if (!file) {
+            Serial.printf("[WAL] FILE_APPEND失敗: %s\n", walPath);
+            return false;
+        }
+    } else {
+        file = LittleFS.open(walPath, FILE_WRITE);
+        if (!file) {
+            Serial.printf("[WAL] ファイル作成失敗: %s\n", walPath);
+            return false;
+        }
     }
     
     // JSON形式で書き込み: 1行 = 1 JSON
@@ -355,203 +718,27 @@ bool recoverToLatest(String &outLastTs) {
                   S().orders.size(), S().menu.size());
     
     // 2. WALログを読み込んで適用
-    File walFile = LittleFS.open("/kds/wal.log", "r");
-    if (!walFile) {
+    std::vector<String> walFiles = listWalFilesForRecovery();
+    if (walFiles.empty()) {
         Serial.println("[RECOVER] WALファイルなし、スナップショットのみで復元完了");
         outLastTs = "snapshot only";
         return true;
     }
-    
+
     int entriesApplied = 0;
     String lastTimestamp = "";
-    
-    while (walFile.available()) {
-        String line = walFile.readStringUntil('\n');
-        line.trim();
-        if (line.length() == 0) continue;
-        
-        // JSON解析
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, line);
-        if (error) {
-            Serial.printf("[RECOVER] JSON解析エラー、スキップ: %s\n", line.c_str());
+
+    for (const String& walPath : walFiles) {
+        File walFile = LittleFS.open(walPath, "r");
+        if (!walFile) {
+            Serial.printf("[RECOVER] WALファイルオープン失敗: %s\n", walPath.c_str());
             continue;
         }
-        
-        uint32_t ts = doc["ts"] | 0;
-        String action = doc["action"] | "";
-        
-        if (action.isEmpty()) {
-            Serial.printf("[RECOVER] action不明、スキップ: %s\n", line.c_str());
-            continue;
-        }
-        
-        lastTimestamp = String(ts);
-        
-        // actionごとの適用処理
-        if (action == "ORDER_CREATE") {
-            String orderNo = doc["orderNo"] | "";
-            if (orderNo.isEmpty()) continue;
-            
-            // 重複チェック（冪等性）
-            bool exists = false;
-            for (const auto& o : S().orders) {
-                if (o.orderNo == orderNo) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) {
-                Order newOrder;
-                newOrder.orderNo = orderNo;
-                newOrder.status = doc["status"] | "PENDING";
-                newOrder.ts = doc["ts"] | 0;
-                newOrder.printed = doc["printed"] | false;
-                newOrder.cooked = doc["cooked"] | false;
-                newOrder.pickup_called = doc["pickup_called"] | false;
-                newOrder.picked_up = doc["picked_up"] | false;
-                
-                // 注文明細を復元
-                if (doc["items"].is<JsonArray>()) {
-                    for (JsonVariantConst itemVar : doc["items"].as<JsonArrayConst>()) {
-                        LineItem item;
-                        item.sku = itemVar["sku"] | "";
-                        item.name = itemVar["name"] | "";
-                        item.qty = itemVar["qty"] | 1;
-                        item.unitPriceApplied = itemVar["unitPriceApplied"] | 0;
-                        item.priceMode = itemVar["priceMode"] | "";
-                        item.kind = itemVar["kind"] | "";
-                        item.unitPrice = itemVar["unitPrice"] | 0;
-                        item.discountName = itemVar["discountName"] | "";
-                        item.discountValue = itemVar["discountValue"] | 0;
-                        newOrder.items.push_back(item);
-                    }
-                }
-                
-                S().orders.push_back(newOrder);
-                Serial.printf("[RECOVER] ORDER_CREATE: %s (items=%d件)\n", orderNo.c_str(), newOrder.items.size());
-            }
-            
-        } else if (action == "ORDER_UPDATE") {
-            String orderNo = doc["orderNo"] | "";
-            String status = doc["status"] | "";
-            
-            for (auto& o : S().orders) {
-                if (o.orderNo == orderNo) {
-                    if (!status.isEmpty()) o.status = status;
-                    if (doc["cooked"].is<bool>()) o.cooked = doc["cooked"];
-                    if (doc["pickup_called"].is<bool>()) o.pickup_called = doc["pickup_called"];
-                    if (doc["picked_up"].is<bool>()) o.picked_up = doc["picked_up"];
-                    if (doc["printed"].is<bool>()) o.printed = doc["printed"];
-                    Serial.printf("[RECOVER] ORDER_UPDATE: %s (status=%s)\n", orderNo.c_str(), status.c_str());
-                    break;
-                }
-            }
-            
-        } else if (action == "ORDER_CANCEL") {
-            String orderNo = doc["orderNo"] | "";
-            String reason = doc["cancelReason"] | "";
-            
-            for (auto& o : S().orders) {
-                if (o.orderNo == orderNo) {
-                    o.status = "CANCELLED";
-                    o.cancelReason = reason;
-                    Serial.printf("[RECOVER] ORDER_CANCEL: %s (reason=%s)\n", orderNo.c_str(), reason.c_str());
-                    break;
-                }
-            }
-            
-        } else if (action == "ORDER_COOKED") {
-            String orderNo = doc["orderNo"] | "";
-            for (auto& o : S().orders) {
-                if (o.orderNo == orderNo) {
-                    o.cooked = true;
-                    o.pickup_called = true;
-                    Serial.printf("[RECOVER] ORDER_COOKED: %s\n", orderNo.c_str());
-                    break;
-                }
-            }
-            
-        } else if (action == "ORDER_PICKED") {
-            String orderNo = doc["orderNo"] | "";
-            for (auto& o : S().orders) {
-                if (o.orderNo == orderNo) {
-                    o.picked_up = true;
-                    o.pickup_called = false;
-                    Serial.printf("[RECOVER] ORDER_PICKED: %s\n", orderNo.c_str());
-                    break;
-                }
-            }
-            
-        } else if (action == "SETTINGS_UPDATE") {
-            // 設定更新
-            if (doc["chinchiro"].is<JsonObject>()) {
-                S().settings.chinchiro.enabled = doc["chinchiro"]["enabled"] | S().settings.chinchiro.enabled;
-                S().settings.chinchiro.rounding = doc["chinchiro"]["rounding"] | S().settings.chinchiro.rounding;
-            }
-            if (doc["qrPrint"].is<JsonObject>()) {
-                S().settings.qrPrint.enabled = doc["qrPrint"]["enabled"] | S().settings.qrPrint.enabled;
-                S().settings.qrPrint.content = doc["qrPrint"]["content"] | S().settings.qrPrint.content;
-            }
-            if (doc["store"].is<JsonObject>()) {
-                S().settings.store.name = doc["store"]["name"] | S().settings.store.name;
-                S().settings.store.nameRomaji = doc["store"]["nameRomaji"] | S().settings.store.nameRomaji;
-                S().settings.store.registerId = doc["store"]["registerId"] | S().settings.store.registerId;
-            }
-            Serial.println("[RECOVER] SETTINGS_UPDATE");
-            
-        } else if (action == "MAIN_UPSERT" || action == "SIDE_UPSERT") {
-            String sku = doc["sku"] | "";
-            if (sku.isEmpty()) continue;
-            
-            // 既存メニューを検索（冪等性）
-            MenuItem* existing = nullptr;
-            for (auto& m : S().menu) {
-                if (m.sku == sku) {
-                    existing = &m;
-                    break;
-                }
-            }
-            
-            if (existing) {
-                // 更新
-                existing->name = doc["name"] | existing->name;
-                existing->nameRomaji = doc["nameRomaji"] | existing->nameRomaji;
-                existing->active = doc["active"] | existing->active;
-                if (action == "MAIN_UPSERT") {
-                    existing->price_normal = doc["price_normal"] | existing->price_normal;
-                    existing->presale_discount_amount = doc["presale_discount_amount"] | existing->presale_discount_amount;
-                } else {
-                    existing->price_single = doc["price_single"] | existing->price_single;
-                    existing->price_as_side = doc["price_as_side"] | existing->price_as_side;
-                }
-                Serial.printf("[RECOVER] %s (update): %s\n", action.c_str(), sku.c_str());
-            } else {
-                // 新規追加
-                MenuItem newItem;
-                newItem.sku = sku;
-                newItem.name = doc["name"] | "";
-                newItem.nameRomaji = doc["nameRomaji"] | "";
-                newItem.category = (action == "MAIN_UPSERT") ? "MAIN" : "SIDE";
-                newItem.active = doc["active"] | true;
-                if (action == "MAIN_UPSERT") {
-                    newItem.price_normal = doc["price_normal"] | 0;
-                    newItem.presale_discount_amount = doc["presale_discount_amount"] | 0;
-                } else {
-                    newItem.price_single = doc["price_single"] | 0;
-                    newItem.price_as_side = doc["price_as_side"] | 0;
-                }
-                S().menu.push_back(newItem);
-                Serial.printf("[RECOVER] %s (insert): %s\n", action.c_str(), sku.c_str());
-            }
-        }
-        
-        entriesApplied++;
+        Serial.printf("[RECOVER] WAL適用開始: %s\n", walPath.c_str());
+        applyWalEntriesFromStream(walFile, walPath, lastTimestamp, entriesApplied);
+        walFile.close();
     }
-    
-    walFile.close();
-    
-    // 3. 復元完了
+
     if (lastTimestamp.length() > 0) {
         uint32_t ts = lastTimestamp.toInt();
         if (ts > 1000000000) { // epoch time

@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <WString.h>
+#include <ArduinoJson.h>
 
 struct Session {
     String sessionId;
@@ -87,6 +88,11 @@ State& S();
 String allocateOrderNo();
 String generateSkuMain();
 String generateSkuSide();
+
+Order* findOrderByNo(const String& orderNo);
+int computeOrderTotal(const Order& order);
+void orderToJson(JsonObject json, const Order& order);
+bool orderFromJson(JsonVariantConst json, Order& order);
 
 bool snapshotSave();
 bool snapshotLoad();

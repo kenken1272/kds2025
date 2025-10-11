@@ -362,38 +362,22 @@ void initHttpRoutes(AsyncWebServer &server) {
 
       S().orders.push_back(order);
       
-      // WAL記録（JSON形式） - 完全な注文データを記録
       JsonDocument walDoc;
       walDoc["ts"] = (uint32_t)time(nullptr);
       walDoc["action"] = "ORDER_CREATE";
-      walDoc["orderNo"] = order.orderNo;
-      walDoc["status"] = order.status;
-      walDoc["printed"] = order.printed;
-      walDoc["cooked"] = order.cooked;
-      walDoc["pickup_called"] = order.pickup_called;
-      walDoc["picked_up"] = order.picked_up;
-      
-      // 注文明細を記録
-      JsonArray itemsArray = walDoc["items"].to<JsonArray>();
-      for (const auto& item : order.items) {
-        JsonObject itemObj = itemsArray.add<JsonObject>();
-        itemObj["sku"] = item.sku;
-        itemObj["name"] = item.name;
-        itemObj["qty"] = item.qty;
-        itemObj["unitPriceApplied"] = item.unitPriceApplied;
-        itemObj["priceMode"] = item.priceMode;
-        itemObj["kind"] = item.kind;
-        itemObj["unitPrice"] = item.unitPrice;
-        if (!item.discountName.isEmpty()) {
-          itemObj["discountName"] = item.discountName;
-          itemObj["discountValue"] = item.discountValue;
-        }
-      }
-      
+  walDoc["orderNo"] = order.orderNo;
+      orderToJson(walDoc.createNestedObject("order"), order);
+
       String walLine; serializeJson(walDoc, walLine);
       walAppend(walLine);
       
       enqueuePrint(order);
+
+      if (!snapshotSave()) {
+        Serial.println("[SNAP] save failed after order create");
+        request->send(500, "application/json", R"({"error":"snapshotSave failed"})");
+        return;
+      }
 
       JsonDocument notify;
       notify["type"] = "order.created";
