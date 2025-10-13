@@ -120,10 +120,14 @@ Order buildOrderFromClientJson(const JsonDocument& req){
           Serial.println("sideSkus配列が存在しないかNULL");
         }
         
-        if (S().settings.chinchiro.enabled && v["chinchoiroMultiplier"].is<float>()) {
-          float multiplier = v["chinchoiroMultiplier"].as<float>();
+        JsonVariant multiplierVar = v["chinchoiroMultiplier"];
+        if (S().settings.chinchiro.enabled && !multiplierVar.isNull()) {
+          float multiplier = multiplierVar.as<float>();
           const char* resultCStr = v["chinchoiroResult"] | "";
           String result = String(resultCStr);
+          if (result.isEmpty()) {
+            result = String(multiplier, 2) + "x";
+          }
           
           if (multiplier != 1.0f) {
             int adjustment = calculateChinchoiroAdjustment(setSubtotal, multiplier, S().settings.chinchiro.rounding);

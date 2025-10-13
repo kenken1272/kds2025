@@ -6,6 +6,7 @@
 #include <sys/time.h>
 #include <algorithm>
 #include <cstdlib>
+#include <utility>
 
 static State g_state;
 
@@ -14,6 +15,64 @@ State& S() {
 }
 
 static Preferences prefs;
+static const char* kDataDir = "/kds";
+static const char* kArchivePath = "/kds/orders_archive.jsonl";
+
+static bool ensureDataDir() {
+    if (LittleFS.exists(kDataDir)) {
+        return true;
+    }
+    if (!LittleFS.mkdir(kDataDir)) {
+        Serial.println("[STORE] ディレクトリ作成失敗: /kds");
+        return false;
+    }
+    Serial.println("[STORE] ディレクトリ作成: /kds");
+    return true;
+}
+
+size_t estimateOrderDocumentCapacity(const Order& order) {
+    size_t cap = 512;
+    cap += order.items.size() * 196;
+    return cap;
+}
+
+static size_t estimateSnapshotCapacity() {
+    size_t base = 64 * 1024;
+    base += S().menu.size() * 256;
+    for (const auto& order : S().orders) {
+        base += 400;
+        base += order.items.size() * 220;
+    }
+    base += 16 * 1024;
+    return base;
+}
+
+static String pickSnapshotPathForWrite() {
+    File fileA = LittleFS.open("/kds/snapA.json", "r");
+    File fileB = LittleFS.open("/kds/snapB.json", "r");
+
+    String target = "/kds/snapA.json";
+    if (fileA && fileB) {
+        target = (fileA.getLastWrite() <= fileB.getLastWrite()) ? "/kds/snapA.json" : "/kds/snapB.json";
+    } else if (fileA && !fileB) {
+        target = "/kds/snapB.json";
+    } else if (!fileA && fileB) {
+        target = "/kds/snapA.json";
+    }
+
+    fileA.close();
+    fileB.close();
+    return target;
+}
+
+static bool populateStateFromSnapshotDoc(const JsonDocument& doc, const char* sourceLabel);
+
+static size_t computeSnapshotLoadCapacity(size_t fileSize) {
+    size_t base = fileSize + fileSize / 2 + 16 * 1024;
+    base = std::max<size_t>(base, 32 * 1024);
+    base = std::min<size_t>(base, 1024 * 1024);
+    return base;
+}
 
 String allocateOrderNo() {
     prefs.begin("kds", false);
@@ -185,21 +244,340 @@ bool orderFromJson(JsonVariantConst json, Order& order) {
     return true;
 }
 
-static bool currentSnapshotIsA = true;
+bool archiveForEach(const String& sessionIdFilter, ArchiveOrderVisitor visitor, void* context) {
+    File file = LittleFS.open(kArchivePath, "r");
+    if (!file) {
+        return true;
+    }
+
+    while (file.available()) {
+        String line = file.readStringUntil('\n');
+        line.trim();
+        if (line.isEmpty()) {
+            continue;
+        }
+
+        DynamicJsonDocument doc(8192);
+        DeserializationError err = deserializeJson(doc, line);
+        if (err == DeserializationError::NoMemory) {
+            DynamicJsonDocument docRetry(16384);
+            err = deserializeJson(docRetry, line);
+            if (!err) {
+                doc = std::move(docRetry);
+            }
+        }
+        if (err) {
+            Serial.printf("[ARCHIVE] JSON解析エラーをスキップ: %s (%s)\n", line.c_str(), err.c_str());
+            continue;
+        }
+
+        String sessionId = doc["sessionId"] | String("");
+        if (!sessionIdFilter.isEmpty() && sessionId != sessionIdFilter) {
+            continue;
+        }
+
+        JsonVariantConst orderVar = doc["order"];
+        if (!orderVar.is<JsonObjectConst>()) {
+            Serial.println("[ARCHIVE] orderデータ形式不正、スキップ");
+            continue;
+        }
+
+        Order order;
+        if (!orderFromJson(orderVar, order)) {
+            JsonObjectConst orderObj = orderVar.as<JsonObjectConst>();
+            order.orderNo = orderObj["orderNo"] | String("");
+            if (order.orderNo.isEmpty()) {
+                Serial.println("[ARCHIVE] order番号欠落のためスキップ");
+                continue;
+            }
+
+            order.status = orderObj["status"] | String("COOKING");
+            order.ts = orderObj["ts"] | 0;
+            order.printed = orderObj["printed"] | false;
+            order.cooked = orderObj["cooked"] | false;
+            order.pickup_called = orderObj["pickup_called"] | false;
+            order.picked_up = orderObj["picked_up"] | false;
+            order.cancelReason = orderObj["cancelReason"] | String("");
+
+            order.items.clear();
+            JsonArrayConst items = orderObj["items"].as<JsonArrayConst>();
+            if (items) {
+                for (JsonVariantConst iv : items) {
+                    if (!iv.is<JsonObjectConst>()) {
+                        continue;
+                    }
+                    JsonObjectConst itemObj = iv.as<JsonObjectConst>();
+                    LineItem li;
+                    li.sku = itemObj["sku"] | String("");
+                    li.name = itemObj["name"] | String("");
+                    li.qty = itemObj["qty"] | 1;
+                    li.unitPriceApplied = itemObj["unitPriceApplied"] | 0;
+                    li.priceMode = itemObj["priceMode"] | String("");
+                    li.kind = itemObj["kind"] | String("");
+                    li.unitPrice = itemObj["unitPrice"] | 0;
+                    li.discountName = itemObj["discountName"] | String("");
+                    li.discountValue = itemObj["discountValue"] | 0;
+                    order.items.push_back(li);
+                }
+            }
+
+            Serial.printf("[ARCHIVE] orderFromJson失敗、フォールバック適用 %s\n", order.orderNo.c_str());
+        }
+
+        uint32_t archivedAt = doc["archivedAt"] | 0;
+        if (visitor && !visitor(order, sessionId, archivedAt, context)) {
+            file.close();
+            return true;
+        }
+    }
+
+    file.close();
+    return true;
+}
+
+bool archiveFindOrder(const String& sessionIdFilter, const String& orderNo, Order& outOrder, uint32_t* archivedAt) {
+    struct FindCtx {
+        const String* targetOrderNo{nullptr};
+        Order* out{nullptr};
+        uint32_t* archivedAtPtr{nullptr};
+        bool found{false};
+        FindCtx(const String& target, Order& dest, uint32_t* archivedPtr)
+          : targetOrderNo(&target), out(&dest), archivedAtPtr(archivedPtr) {}
+    } ctx(orderNo, outOrder, archivedAt);
+
+    auto visitor = [](const Order& order, const String&, uint32_t archivedAtValue, void* rawCtx) -> bool {
+        auto* c = static_cast<FindCtx*>(rawCtx);
+        if (c && c->targetOrderNo && order.orderNo == *c->targetOrderNo) {
+            if (c->out) {
+                *c->out = order;
+            }
+            if (c->archivedAtPtr) {
+                *c->archivedAtPtr = archivedAtValue;
+            }
+            c->found = true;
+            return false;
+        }
+        return true;
+    };
+
+    archiveForEach(sessionIdFilter, visitor, &ctx);
+    return ctx.found;
+}
+
+static bool archiveOrderExists(const String& sessionId, const String& orderNo) {
+    struct ExistsCtx {
+        const String* targetOrderNo{nullptr};
+        bool found{false};
+        explicit ExistsCtx(const String& target) : targetOrderNo(&target) {}
+    } ctx(orderNo);
+
+    auto visitor = [](const Order& order, const String&, uint32_t, void* rawCtx) -> bool {
+        auto* c = static_cast<ExistsCtx*>(rawCtx);
+        if (c && c->targetOrderNo && order.orderNo == *c->targetOrderNo) {
+            c->found = true;
+            return false;
+        }
+        return true;
+    };
+
+    archiveForEach(sessionId, visitor, &ctx);
+    return ctx.found;
+}
+
+bool archiveAppend(const Order& order, const String& sessionId, uint32_t archivedAt) {
+    if (archivedAt == 0) {
+        archivedAt = static_cast<uint32_t>(time(nullptr));
+    }
+
+    if (!ensureDataDir()) {
+        return false;
+    }
+
+    File file = LittleFS.open(kArchivePath, FILE_APPEND);
+    if (!file) {
+        file = LittleFS.open(kArchivePath, FILE_WRITE);
+    }
+    if (!file) {
+        Serial.printf("[ARCHIVE] ファイルオープン失敗: %s\n", kArchivePath);
+        return false;
+    }
+
+    DynamicJsonDocument doc(estimateOrderDocumentCapacity(order));
+    JsonObject root = doc.to<JsonObject>();
+    root["sessionId"] = sessionId;
+    root["archivedAt"] = archivedAt;
+    JsonObject orderObj = root.createNestedObject("order");
+    orderToJson(orderObj, order);
+
+    String line;
+    serializeJson(root, line);
+    if (line.isEmpty()) {
+        Serial.println("[ARCHIVE] シリアライズ失敗");
+        file.close();
+        return false;
+    }
+
+    file.println(line);
+    file.flush();
+    file.close();
+
+    Serial.printf("[ARCHIVE] 追記成功: order=%s session=%s\n", order.orderNo.c_str(), sessionId.c_str());
+    return true;
+}
+
+bool archiveOrderAndRemove(const String& orderNo, const String& sessionId, uint32_t archivedAt, bool logWal) {
+    if (archivedAt == 0) {
+        archivedAt = static_cast<uint32_t>(time(nullptr));
+    }
+
+    int index = -1;
+    for (int i = 0; i < static_cast<int>(S().orders.size()); ++i) {
+        if (S().orders[i].orderNo == orderNo) {
+            index = i;
+            break;
+        }
+    }
+
+    if (index < 0) {
+        Serial.printf("[ARCHIVE] 注文が見つからないためアーカイブできません: %s\n", orderNo.c_str());
+        return false;
+    }
+
+    Order orderCopy = S().orders[index];
+
+    if (!logWal && archiveOrderExists(sessionId, orderNo)) {
+        Serial.printf("[ARCHIVE] 既にアーカイブ済み: %s\n", orderNo.c_str());
+    } else {
+        if (!archiveAppend(orderCopy, sessionId, archivedAt)) {
+            Serial.printf("[ARCHIVE] 追記失敗: %s\n", orderNo.c_str());
+            return false;
+        }
+    }
+
+    S().orders.erase(S().orders.begin() + index);
+
+    if (logWal) {
+    DynamicJsonDocument walDoc(estimateOrderDocumentCapacity(orderCopy) + 512);
+        walDoc["ts"] = archivedAt;
+        walDoc["action"] = "ORDER_ARCHIVE";
+        walDoc["orderNo"] = orderCopy.orderNo;
+        walDoc["sessionId"] = sessionId;
+        walDoc["archivedAt"] = archivedAt;
+        JsonObject orderObj = walDoc.createNestedObject("order");
+        orderToJson(orderObj, orderCopy);
+
+        String walLine;
+        serializeJson(walDoc, walLine);
+        walAppend(walLine);
+    }
+
+    Serial.printf("[ARCHIVE] アーカイブ完了: %s (session=%s)\n", orderCopy.orderNo.c_str(), sessionId.c_str());
+    return true;
+}
+
+bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t archivedAt) {
+    if (!LittleFS.exists(kArchivePath)) {
+        Serial.printf("[ARCHIVE] 置換失敗: ファイルが存在しません (%s)\n", kArchivePath);
+        return false;
+    }
+
+    File input = LittleFS.open(kArchivePath, "r");
+    if (!input) {
+        Serial.printf("[ARCHIVE] 置換失敗: 読み込み不可 (%s)\n", kArchivePath);
+        return false;
+    }
+
+    const char* tempPath = "/kds/orders_archive.tmp";
+    File temp = LittleFS.open(tempPath, "w");
+    if (!temp) {
+        Serial.printf("[ARCHIVE] 置換失敗: 一時ファイル作成不可 (%s)\n", tempPath);
+        input.close();
+        return false;
+    }
+
+    bool updated = false;
+    while (input.available()) {
+        String line = input.readStringUntil('\n');
+        line.trim();
+        if (line.isEmpty()) {
+            temp.println();
+            continue;
+        }
+
+        DynamicJsonDocument doc(std::max<size_t>(estimateOrderDocumentCapacity(order) + 512, 8192));
+        DeserializationError err = deserializeJson(doc, line);
+        if (err) {
+            Serial.printf("[ARCHIVE] 置換: JSON解析失敗をスキップ (%s)\n", err.c_str());
+            temp.println(line);
+            continue;
+        }
+
+        String existingSession = doc["sessionId"] | String("");
+        JsonObject orderObj = doc["order"].is<JsonObject>() ? doc["order"].as<JsonObject>() : JsonObject();
+        String existingOrderNo = orderObj["orderNo"] | String("");
+
+        if (!updated && existingSession == sessionId && existingOrderNo == order.orderNo) {
+            if (archivedAt == 0) {
+                archivedAt = doc["archivedAt"] | archivedAt;
+            }
+            doc["sessionId"] = sessionId;
+            doc["archivedAt"] = archivedAt;
+            if (doc.containsKey("order")) {
+                doc.remove("order");
+            }
+            JsonObject newOrderObj = doc.createNestedObject("order");
+            orderToJson(newOrderObj, order);
+            updated = true;
+        }
+
+        String outLine;
+        serializeJson(doc, outLine);
+        temp.println(outLine);
+    }
+
+    temp.flush();
+    temp.close();
+    input.close();
+
+    if (!updated) {
+        Serial.printf("[ARCHIVE] 置換失敗: 対象注文が見つかりません (%s)\n", order.orderNo.c_str());
+        LittleFS.remove(tempPath);
+        return false;
+    }
+
+    String backupPath = String(kArchivePath) + ".bak";
+    if (LittleFS.exists(backupPath)) {
+        LittleFS.remove(backupPath);
+    }
+
+    if (!LittleFS.rename(kArchivePath, backupPath)) {
+        Serial.printf("[ARCHIVE] 置換失敗: バックアップ作成不可 (%s)\n", backupPath.c_str());
+        LittleFS.remove(tempPath);
+        return false;
+    }
+
+    if (!LittleFS.rename(tempPath, kArchivePath)) {
+        Serial.printf("[ARCHIVE] 置換失敗: rename不可 (%s)\n", tempPath);
+        LittleFS.rename(backupPath, kArchivePath);
+        LittleFS.remove(tempPath);
+        return false;
+    }
+
+    LittleFS.remove(backupPath);
+    Serial.printf("[ARCHIVE] 置換成功: order=%s session=%s\n", order.orderNo.c_str(), sessionId.c_str());
+    return true;
+}
 
 bool snapshotSave() {
     Serial.printf("=== snapshotSave開始: 注文数=%d, メニュー数=%d ===\n", 
                   S().orders.size(), S().menu.size());
     
-    if (!LittleFS.exists("/kds")) {
-        if (!LittleFS.mkdir("/kds")) {
-            Serial.println("ディレクトリ作成失敗: /kds");
-            return false;
-        }
-        Serial.println("ディレクトリ作成完了: /kds");
+    if (!ensureDataDir()) {
+        return false;
     }
     
-    JsonDocument doc;
+    size_t docCapacity = std::max<size_t>(estimateSnapshotCapacity(), 32 * 1024);
+    DynamicJsonDocument doc(docCapacity);
     doc["settings"]["catalogVersion"] = S().settings.catalogVersion;
     doc["settings"]["chinchiro"]["enabled"] = S().settings.chinchiro.enabled;
     JsonArray mult = doc["settings"]["chinchiro"]["multipliers"].to<JsonArray>();
@@ -248,95 +626,162 @@ bool snapshotSave() {
                       order.cooked, order.picked_up, order.pickup_called, order.items.size());
     }
     
-    String filename = currentSnapshotIsA ? "/kds/snapA.json" : "/kds/snapB.json";
+    String filename = pickSnapshotPathForWrite();
     File file = LittleFS.open(filename, "w");
     if (!file) {
         Serial.printf("スナップショット保存失敗: %s\n", filename.c_str());
         return false;
     }
     
-    serializeJson(doc, file);
+    size_t jsonSize = measureJson(doc);
+    Serial.printf("[SNAP] JSON size=%u (cap=%u)\n", static_cast<unsigned>(jsonSize), static_cast<unsigned>(doc.capacity()));
+    size_t written = serializeJson(doc, file);
     file.flush();
     file.close();
-    
-    currentSnapshotIsA = !currentSnapshotIsA;
+    if (written == 0) {
+        Serial.printf("[SNAP] serialize failed: %s\n", filename.c_str());
+        return false;
+    }
+
+    size_t fileSize = 0;
+    File verify = LittleFS.open(filename, "r");
+    if (verify) {
+        fileSize = verify.size();
+        verify.close();
+    }
+    Serial.printf("[SNAP] file size=%u bytes\n", static_cast<unsigned>(fileSize));
     
     Serial.printf("スナップショット保存完了: %s\n", filename.c_str());
     return true;
 }
 
 bool snapshotLoad() {
-    File fileA = LittleFS.open("/kds/snapA.json", "r");
-    File fileB = LittleFS.open("/kds/snapB.json", "r");
-    
-    bool useA = true;
-    if (fileA && fileB) {
-        time_t timeA = fileA.getLastWrite();
-        time_t timeB = fileB.getLastWrite();
-        useA = (timeA >= timeB);
-    } else if (fileB && !fileA) {
-        useA = false;
-    } else if (!fileA && !fileB) {
-        fileA.close();
-        fileB.close();
+    const char* pathA = "/kds/snapA.json";
+    const char* pathB = "/kds/snapB.json";
+
+    File fileA = LittleFS.open(pathA, "r");
+    File fileB = LittleFS.open(pathB, "r");
+
+    bool hasA = fileA;
+    bool hasB = fileB;
+    time_t timeA = hasA ? fileA.getLastWrite() : 0;
+    time_t timeB = hasB ? fileB.getLastWrite() : 0;
+    fileA.close();
+    fileB.close();
+
+    if (!hasA && !hasB) {
         ensureInitialMenu();
         return true;
     }
-    
-    File file = useA ? fileA : fileB;
-    String filename = useA ? "/kds/snapA.json" : "/kds/snapB.json";
-    
-    if (!useA) {
-        fileA.close();
-    } else {
-        fileB.close();
+
+    const char* newer = nullptr;
+    const char* older = nullptr;
+    if (hasA && hasB) {
+        if (timeA >= timeB) {
+            newer = pathA;
+            older = pathB;
+        } else {
+            newer = pathB;
+            older = pathA;
+        }
+    } else if (hasA) {
+        newer = pathA;
+    } else if (hasB) {
+        newer = pathB;
     }
-    
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, file);
-    file.close();
-    
-    if (error) {
-        Serial.printf("スナップショット読込エラー: %s - %s\n", filename.c_str(), error.c_str());
-        ensureInitialMenu();
+
+    auto tryLoad = [&](const char* path) -> bool {
+        if (!path) {
+            return false;
+        }
+        File f = LittleFS.open(path, "r");
+        if (!f) {
+            return false;
+        }
+        size_t loadCapacity = computeSnapshotLoadCapacity(f.size());
+        Serial.printf("[SNAP] load candidate: %s (size=%u, cap=%u)\n", path, static_cast<unsigned>(f.size()), static_cast<unsigned>(loadCapacity));
+        DynamicJsonDocument doc(loadCapacity);
+        if (doc.capacity() == 0) {
+            Serial.printf("スナップショット用にメモリ確保失敗: %s (requested=%u)\n", path, static_cast<unsigned>(loadCapacity));
+            f.close();
+            return false;
+        }
+        DeserializationError err = deserializeJson(doc, f);
+        f.close();
+        if (err) {
+            Serial.printf("スナップショット読込エラー: %s - %s\n", path, err.c_str());
+            return false;
+        }
+        if (!populateStateFromSnapshotDoc(doc, path)) {
+            Serial.printf("スナップショット内容不正: %s (root type=%s)\n", path, doc.is<JsonObject>() ? "object" : "non-object");
+            return false;
+        }
+        return true;
+    };
+
+    if (tryLoad(newer)) {
+        return true;
+    }
+
+    Serial.printf("[SNAP] 新しいスナップショット読み込み失敗、古い方を試行: %s\n", newer ? newer : "(none)");
+    if (tryLoad(older)) {
+        return true;
+    }
+
+    Serial.println("[SNAP] スナップショットが復元できないため初期データに切替");
+    ensureInitialMenu();
+    return false;
+}
+
+static bool populateStateFromSnapshotDoc(const JsonDocument& doc, const char* sourceLabel) {
+    JsonObjectConst root = doc.as<JsonObjectConst>();
+    if (!root) {
+        Serial.printf("[SNAP] root not object: %s\n", sourceLabel);
         return false;
     }
-    if (doc["settings"].is<JsonObject>()) {
-        S().settings.catalogVersion = doc["settings"]["catalogVersion"] | 1;
-        S().settings.chinchiro.enabled = doc["settings"]["chinchiro"]["enabled"] | true;
-        S().settings.chinchiro.rounding = doc["settings"]["chinchiro"]["rounding"] | "round";
-        
+
+    JsonObjectConst settings = root["settings"].as<JsonObjectConst>();
+    if (settings) {
+        S().settings.catalogVersion = settings["catalogVersion"] | 1;
+        S().settings.chinchiro.enabled = settings["chinchiro"]["enabled"] | true;
+        S().settings.chinchiro.rounding = settings["chinchiro"]["rounding"] | "round";
+
         S().settings.chinchiro.multipliers.clear();
-        if (doc["settings"]["chinchiro"]["multipliers"].is<JsonArray>()) {
-            for (JsonVariantConst v : doc["settings"]["chinchiro"]["multipliers"].as<JsonArrayConst>()) {
+        JsonArrayConst chinMult = settings["chinchiro"]["multipliers"].as<JsonArrayConst>();
+        if (chinMult) {
+            for (JsonVariantConst v : chinMult) {
                 S().settings.chinchiro.multipliers.push_back(v.as<float>());
             }
         }
-        
-        S().settings.numbering.min = doc["settings"]["numbering"]["min"] | 1;
-        S().settings.numbering.max = doc["settings"]["numbering"]["max"] | 9999;
-        S().settings.store.name = doc["settings"]["store"]["name"] | "KDS BURGER";
-        S().settings.store.nameRomaji = doc["settings"]["store"]["nameRomaji"] | "KDS BURGER";
-        S().settings.store.registerId = doc["settings"]["store"]["registerId"] | "REG-01";
-        S().settings.qrPrint.enabled = doc["settings"]["qrPrint"]["enabled"] | false;
-        S().settings.qrPrint.content = doc["settings"]["qrPrint"]["content"] | "";
+
+        S().settings.numbering.min = settings["numbering"]["min"] | 1;
+        S().settings.numbering.max = settings["numbering"]["max"] | 9999;
+        S().settings.store.name = settings["store"]["name"] | "KDS BURGER";
+        S().settings.store.nameRomaji = settings["store"]["nameRomaji"] | "KDS BURGER";
+        S().settings.store.registerId = settings["store"]["registerId"] | "REG-01";
+        S().settings.qrPrint.enabled = settings["qrPrint"]["enabled"] | false;
+        S().settings.qrPrint.content = settings["qrPrint"]["content"] | "";
     }
-    
-    if (doc["session"].is<JsonObject>()) {
-        S().session.sessionId = doc["session"]["sessionId"] | "";
-        S().session.startedAt = doc["session"]["startedAt"] | 0;
-        S().session.exported = doc["session"]["exported"] | false;
-        S().session.nextOrderSeq = doc["session"]["nextOrderSeq"] | 1;
+
+    JsonObjectConst session = root["session"].as<JsonObjectConst>();
+    if (session) {
+        S().session.sessionId = session["sessionId"] | "";
+        S().session.startedAt = session["startedAt"] | 0;
+        S().session.exported = session["exported"] | false;
+        S().session.nextOrderSeq = session["nextOrderSeq"] | 1;
     }
-    
-    if (doc["printer"].is<JsonObject>()) {
-        S().printer.paperOut = doc["printer"]["paperOut"] | false;
-        S().printer.overheat = doc["printer"]["overheat"] | false;
-        S().printer.holdJobs = doc["printer"]["holdJobs"] | 0;
+
+    JsonObjectConst printer = root["printer"].as<JsonObjectConst>();
+    if (printer) {
+        S().printer.paperOut = printer["paperOut"] | false;
+        S().printer.overheat = printer["overheat"] | false;
+        S().printer.holdJobs = printer["holdJobs"] | 0;
     }
+
     S().menu.clear();
-    if (doc["menu"].is<JsonArray>()) {
-        for (JsonVariantConst v : doc["menu"].as<JsonArrayConst>()) {
+    JsonArrayConst menu = root["menu"].as<JsonArrayConst>();
+    if (menu) {
+        for (JsonVariantConst v : menu) {
             MenuItem item;
             item.sku = v["sku"] | "";
             item.name = v["name"] | "";
@@ -351,10 +796,11 @@ bool snapshotLoad() {
             S().menu.push_back(item);
         }
     }
-    
+
     S().orders.clear();
-    if (doc["orders"].is<JsonArray>()) {
-        for (JsonVariantConst v : doc["orders"].as<JsonArrayConst>()) {
+    JsonArrayConst orders = root["orders"].as<JsonArrayConst>();
+    if (orders) {
+        for (JsonVariantConst v : orders) {
             Order order;
             bool parsed = orderFromJson(v, order);
             if (!parsed) {
@@ -367,8 +813,9 @@ bool snapshotLoad() {
                 order.picked_up = v["picked_up"] | false;
                 order.pickup_called = v["pickup_called"] | false;
 
-                if (v["items"].is<JsonArray>()) {
-                    for (JsonVariantConst iv : v["items"].as<JsonArrayConst>()) {
+                JsonArrayConst items = v["items"].as<JsonArrayConst>();
+                if (items) {
+                    for (JsonVariantConst iv : items) {
                         LineItem item;
                         item.sku = iv["sku"] | "";
                         item.name = iv["name"] | "";
@@ -385,23 +832,23 @@ bool snapshotLoad() {
             }
 
             Serial.printf("  復元: 注文 %s: status=%s, cooked=%d, picked_up=%d, pickup_called=%d, items=%d件\n",
-                          order.orderNo.c_str(), order.status.c_str(), 
+                          order.orderNo.c_str(), order.status.c_str(),
                           order.cooked, order.picked_up, order.pickup_called, order.items.size());
 
             S().orders.push_back(order);
         }
     }
-    
-    Serial.printf("スナップショット読込完了: %s\n", filename.c_str());
+
+    Serial.printf("スナップショット読込完了: %s\n", sourceLabel);
     Serial.printf("復元されたデータ: 注文数=%d件, メニュー数=%d件\n", S().orders.size(), S().menu.size());
-    
+
     if (S().menu.empty()) {
         Serial.println("スナップショットにメニューが含まれていないため、初期メニューを投入");
         ensureInitialMenu();
     } else {
         Serial.printf("スナップショットからメニュー復元: %d件\n", S().menu.size());
     }
-    
+
     return true;
 }
 
@@ -488,7 +935,7 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             continue;
         }
 
-        JsonDocument doc;
+    DynamicJsonDocument doc(8192);
         DeserializationError error = deserializeJson(doc, line);
         if (error) {
             Serial.printf("[RECOVER] JSON解析エラー、スキップ (%s): %s\n", sourceLabel.c_str(), line.c_str());
@@ -496,7 +943,7 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
         }
 
         uint32_t ts = doc["ts"] | 0;
-        String action = doc["action"] | "";
+        String action = doc["action"] | doc["type"] | "";
         if (action.isEmpty()) {
             Serial.printf("[RECOVER] action不明、スキップ (%s): %s\n", sourceLabel.c_str(), line.c_str());
             continue;
@@ -513,7 +960,7 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             }
             if (!parsed) {
                 restored.orderNo = doc["orderNo"] | String("");
-                if (!restored.orderNo.isEmpty()) {
+                if (!restored.orderNo.isEmpty() && doc["items"].is<JsonArrayConst>()) {
                     restored.status = doc["status"] | String("PENDING");
                     restored.ts = doc["orderTs"] | (uint32_t)(doc["ts"] | 0);
                     restored.printed = doc["printed"] | false;
@@ -522,39 +969,40 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                     restored.picked_up = doc["picked_up"] | false;
                     restored.cancelReason = doc["cancelReason"] | String("");
                     restored.items.clear();
-                    if (doc["items"].is<JsonArrayConst>()) {
-                        for (JsonVariantConst itemVar : doc["items"].as<JsonArrayConst>()) {
-                            if (!itemVar.is<JsonObjectConst>()) {
-                                continue;
-                            }
-                            JsonObjectConst itemObj = itemVar.as<JsonObjectConst>();
-                            LineItem item;
-                            item.sku = itemObj["sku"] | String("");
-                            item.name = itemObj["name"] | String("");
-                            item.qty = itemObj["qty"] | 1;
-                            item.unitPriceApplied = itemObj["unitPriceApplied"] | 0;
-                            item.priceMode = itemObj["priceMode"] | String("");
-                            item.kind = itemObj["kind"] | String("");
-                            item.unitPrice = itemObj["unitPrice"] | 0;
-                            item.discountName = itemObj["discountName"] | String("");
-                            item.discountValue = itemObj["discountValue"] | 0;
-                            restored.items.push_back(item);
+                    for (JsonVariantConst itemVar : doc["items"].as<JsonArrayConst>()) {
+                        if (!itemVar.is<JsonObjectConst>()) {
+                            continue;
                         }
+                        JsonObjectConst itemObj = itemVar.as<JsonObjectConst>();
+                        LineItem item;
+                        item.sku = itemObj["sku"] | String("");
+                        item.name = itemObj["name"] | String("");
+                        item.qty = itemObj["qty"] | 1;
+                        item.unitPriceApplied = itemObj["unitPriceApplied"] | 0;
+                        item.priceMode = itemObj["priceMode"] | String("");
+                        item.kind = itemObj["kind"] | String("");
+                        item.unitPrice = itemObj["unitPrice"] | 0;
+                        item.discountName = itemObj["discountName"] | String("");
+                        item.discountValue = itemObj["discountValue"] | 0;
+                        restored.items.push_back(item);
                     }
-                    parsed = true;
+                    parsed = !restored.items.empty();
                 }
             }
 
-            if (parsed) {
-                Order* existing = findOrderByNo(restored.orderNo);
-                if (existing) {
-                    *existing = restored;
-                } else {
-                    S().orders.push_back(restored);
-                }
-                Serial.printf("[RECOVER] ORDER_CREATE (%s): %s (items=%d件)\n", sourceLabel.c_str(), restored.orderNo.c_str(), restored.items.size());
-                appliedEntry = true;
+            if (!parsed) {
+                Serial.printf("[RECOVER] ORDER_CREATE スキップ: order payload missing body (%s)\n", sourceLabel.c_str());
+                continue;
             }
+
+            Order* existing = findOrderByNo(restored.orderNo);
+            if (existing) {
+                *existing = restored;
+            } else {
+                S().orders.push_back(restored);
+            }
+            Serial.printf("[RECOVER] ORDER_CREATE (%s): %s (items=%d件)\n", sourceLabel.c_str(), restored.orderNo.c_str(), restored.items.size());
+            appliedEntry = true;
 
         } else if (action == "ORDER_UPDATE") {
             String orderNo = doc["orderNo"] | "";
@@ -578,6 +1026,9 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             if (target) {
                 target->status = "CANCELLED";
                 target->cancelReason = doc["cancelReason"] | String("");
+                target->cooked = false;
+                target->pickup_called = false;
+                target->picked_up = false;
                 Serial.printf("[RECOVER] ORDER_CANCEL (%s): %s (reason=%s)\n", sourceLabel.c_str(), orderNo.c_str(), target->cancelReason.c_str());
                 appliedEntry = true;
             }
@@ -601,6 +1052,45 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                 Serial.printf("[RECOVER] ORDER_PICKED (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
                 appliedEntry = true;
             }
+
+        } else if (action == "ORDER_ARCHIVE") {
+            String orderNo = doc["orderNo"] | "";
+            if (orderNo.isEmpty()) {
+                Serial.printf("[RECOVER] ORDER_ARCHIVE orderNo欠落 (%s)\n", sourceLabel.c_str());
+                continue;
+            }
+
+            String sessionId = doc["sessionId"] | String("");
+            if (sessionId.isEmpty()) {
+                sessionId = S().session.sessionId;
+            }
+            uint32_t archivedAt = doc["archivedAt"] | ts;
+
+            Order* target = findOrderByNo(orderNo);
+            Order payload;
+            bool hasPayload = false;
+            if (target) {
+                payload = *target;
+                hasPayload = true;
+            } else if (doc["order"].is<JsonObjectConst>()) {
+                hasPayload = orderFromJson(doc["order"], payload);
+            }
+
+            if (!hasPayload) {
+                Serial.printf("[RECOVER] ORDER_ARCHIVE payload欠落 (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
+                continue;
+            }
+
+            if (target) {
+                archiveOrderAndRemove(orderNo, sessionId, archivedAt, false);
+                Serial.printf("[RECOVER] ORDER_ARCHIVE remove (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
+            } else if (!archiveOrderExists(sessionId, orderNo)) {
+                archiveAppend(payload, sessionId, archivedAt);
+                Serial.printf("[RECOVER] ORDER_ARCHIVE append only (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
+            } else {
+                Serial.printf("[RECOVER] ORDER_ARCHIVE skip duplicate (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
+            }
+            appliedEntry = true;
 
         } else if (action == "SETTINGS_UPDATE") {
             if (doc["chinchiro"].is<JsonObject>()) {
@@ -670,11 +1160,8 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
 }
 
 bool walAppend(const String& line) {
-    if (!LittleFS.exists("/kds")) {
-        if (!LittleFS.mkdir("/kds")) {
-            Serial.println("[WAL] ディレクトリ作成失敗: /kds");
-            return false;
-        }
+    if (!ensureDataDir()) {
+        return false;
     }
     
     const char* walPath = "/kds/wal.log";
@@ -880,4 +1367,49 @@ void ensureInitialMenu() {
     createInitialMenuItems();
     
     snapshotSave();
+}
+
+bool getLatestSnapshotJson(String& outJson, String& outPath) {
+    const char* pathA = "/kds/snapA.json";
+    const char* pathB = "/kds/snapB.json";
+
+    File fileA = LittleFS.open(pathA, "r");
+    File fileB = LittleFS.open(pathB, "r");
+
+    bool hasA = fileA;
+    bool hasB = fileB;
+    time_t timeA = hasA ? fileA.getLastWrite() : 0;
+    time_t timeB = hasB ? fileB.getLastWrite() : 0;
+
+    const char* target = nullptr;
+    if (hasA && hasB) {
+        target = (timeA >= timeB) ? pathA : pathB;
+    } else if (hasA) {
+        target = pathA;
+    } else if (hasB) {
+        target = pathB;
+    }
+
+    fileA.close();
+    fileB.close();
+
+    if (!target) {
+        return false;
+    }
+
+    File snapshot = LittleFS.open(target, "r");
+    if (!snapshot) {
+        return false;
+    }
+
+    size_t size = snapshot.size();
+    outJson = "";
+    outJson.reserve(size + 1);
+    while (snapshot.available()) {
+        outJson += static_cast<char>(snapshot.read());
+    }
+    snapshot.close();
+
+    outPath = target;
+    return true;
 }

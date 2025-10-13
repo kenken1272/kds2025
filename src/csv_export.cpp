@@ -7,6 +7,45 @@ static inline void writeBOM(AsyncResponseStream *res) {
   res->write(bom, 3);
 }
 
+static void writeOrderCsvRows(AsyncResponseStream* res, const Order& order, const String& sessionId) {
+  int ln = 0;
+  for (const auto& li : order.items) {
+    ++ln;
+    int lineTotal = li.unitPriceApplied * li.qty - li.discountValue;
+    res->printf(
+      "%u,%s,%s,%d,%s,%s,%d,%d,%s,%s,%d,%s\r\n",
+      (unsigned)order.ts,
+      sessionId.c_str(),
+      order.orderNo.c_str(),
+      ln,
+      li.sku.c_str(),
+      li.name.c_str(),
+      li.qty,
+      li.unitPriceApplied,
+      li.priceMode.c_str(),
+      li.kind.c_str(),
+      lineTotal,
+      order.status.c_str()
+    );
+  }
+}
+
+struct CsvArchiveContext {
+  AsyncResponseStream* res{nullptr};
+  String sessionId;
+  CsvArchiveContext(AsyncResponseStream* stream, const String& session)
+    : res(stream), sessionId(session) {}
+};
+
+static bool csvArchiveVisitor(const Order& order, const String& sessionId, uint32_t, void* ctx) {
+  auto* context = static_cast<CsvArchiveContext*>(ctx);
+  if (!context || !context->res) {
+    return false;
+  }
+  writeOrderCsvRows(context->res, order, sessionId);
+  return true;
+}
+
 void sendCsvStream(AsyncWebServerRequest *req){
   String fname = "attachment; filename=\"sales_" + S().session.sessionId + ".csv\"";
   AsyncResponseStream *res = req->beginResponseStream("text/csv");
@@ -15,27 +54,11 @@ void sendCsvStream(AsyncWebServerRequest *req){
   writeBOM(res);
   res->print("ts,sessionId,orderNo,lineNo,sku,name,qty,unitPriceApplied,priceMode,kind,lineTotal,status\r\n");
 
-  for (auto &o : S().orders){
-    int ln = 0;
-    for (auto &li : o.items){
-      ++ln;
-      int lineTotal = li.unitPriceApplied * li.qty - li.discountValue;
-      res->printf(
-        "%u,%s,%s,%d,%s,%s,%d,%d,%s,%s,%d,%s\r\n",
-        (unsigned)o.ts,
-        S().session.sessionId.c_str(),
-        o.orderNo.c_str(),
-        ln,
-        li.sku.c_str(),
-        li.name.c_str(),
-        li.qty,
-        li.unitPriceApplied,
-        li.priceMode.c_str(),
-        li.kind.c_str(),
-        lineTotal,
-        o.status.c_str()
-      );
-    }
+  for (const auto& o : S().orders) {
+    writeOrderCsvRows(res, o, S().session.sessionId);
   }
+
+  CsvArchiveContext ctx(res, S().session.sessionId);
+  archiveForEach(S().session.sessionId, csvArchiveVisitor, &ctx);
   req->send(res);
 }

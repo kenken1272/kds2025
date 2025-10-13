@@ -5,8 +5,64 @@ const state = {
     data: null, 
     cart: [],
     settingsTab: 'main', 
-    callList: [] 
+    callList: [],
+    memory: null,
+    archived: {
+        sessionId: null,
+        orders: [],
+        loading: false,
+        error: null,
+        fetched: false
+    }
 };
+
+function calculateOrderTotal(order) {
+    if (!order || !Array.isArray(order.items)) {
+        return 0;
+    }
+    return order.items.reduce((sum, item) => {
+        const unitPrice = item.unitPriceApplied || item.unitPrice || 0;
+        const qty = item.qty || 1;
+        const discount = item.discountValue || 0;
+        return sum + (unitPrice * qty) - discount;
+    }, 0);
+}
+
+function formatArchivedTimestamp(ts) {
+    if (!ts || ts < 946684800) {
+        return '時刻不明';
+    }
+    const date = new Date(ts * 1000);
+    return date.toLocaleString('ja-JP', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+function getOrderFromState(orderNo) {
+    if (!orderNo) {
+        return null;
+    }
+    if (state.data && Array.isArray(state.data.orders)) {
+        const active = state.data.orders.find(order => order.orderNo === orderNo);
+            if (active && active.orderNo) {
+            return { order: active, source: 'active' };
+        }
+    }
+    if (state.archived && Array.isArray(state.archived.orders)) {
+        const archived = state.archived.orders.find(order => order.orderNo === orderNo);
+        if (archived) {
+            return { order: archived, source: 'archived' };
+        }
+    }
+    return null;
+}
+
+let memoryMonitorTimer = null;
 
 const app = document.getElementById('app');
 const offlineModal = document.getElementById('offline-modal');
@@ -98,11 +154,86 @@ async function loadStateData() {
         const response = await fetch('/api/state');
         state.data = await response.json();
         console.log('状態データ取得完了:', state.data);
+    const forceArchiveReload = state.settingsTab === 'sales';
+    await loadArchivedOrders(state.data.session.sessionId, forceArchiveReload);
         render(); 
         updateConfirmOrderButton();
     } catch (error) {
         console.error('状態データ取得エラー:', error);
     }
+}
+
+async function loadArchivedOrders(sessionId, force = false) {
+    if (!sessionId) {
+        state.archived.sessionId = null;
+        state.archived.orders = [];
+        state.archived.loading = false;
+        state.archived.error = null;
+        state.archived.fetched = false;
+        return;
+    }
+
+    if (state.archived.sessionId && state.archived.sessionId !== sessionId) {
+        state.archived.fetched = false;
+        state.archived.orders = [];
+    }
+
+    if (!force && state.archived.fetched && state.archived.sessionId === sessionId) {
+        return;
+    }
+    if (state.archived.loading) {
+        return;
+    }
+
+    state.archived.loading = true;
+    state.archived.error = null;
+    state.archived.sessionId = sessionId;
+    if (state.settingsTab === 'sales') {
+        render();
+    }
+
+    try {
+        const response = await fetch(`/api/orders/archive?sessionId=${encodeURIComponent(sessionId)}`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        state.archived.sessionId = data.sessionId || sessionId;
+        state.archived.orders = Array.isArray(data.orders) ? data.orders : [];
+        state.archived.error = null;
+        state.archived.fetched = true;
+    } catch (error) {
+        console.error('アーカイブ注文取得エラー:', error);
+        state.archived.orders = [];
+        state.archived.error = error.message || 'unknown';
+        state.archived.fetched = false;
+    } finally {
+        state.archived.loading = false;
+        if (state.settingsTab === 'sales') {
+            render();
+        }
+        const widget = document.getElementById('completed-orders-widget');
+        if (widget && widget.style.display !== 'none') {
+            loadCompletedOrders();
+        }
+    }
+}
+
+function ensureArchivedOrders(force = false) {
+    if (!state.data || !state.data.session) {
+        return;
+    }
+    const sessionId = state.data.session.sessionId;
+    if (!sessionId) {
+        return;
+    }
+    if (state.archived.loading) {
+        return;
+    }
+    if (!force && state.archived.fetched && state.archived.sessionId === sessionId) {
+        return;
+    }
+    loadArchivedOrders(sessionId, force);
 }
 async function syncTimeOnce() {
     const now = new Date();
@@ -476,7 +607,7 @@ function renderKitchenPage() {
                 }).join('')}
             </div>
             ${cookingOrders.length === 0 ? 
-                '<div class="no-orders" style="text-align: center; font-size: 1.5em; color: #666; margin-top: 50px;">🎉 調理待ちの注文はありません</div>' : 
+                '<div class="no-orders" style="text-align: center; font-size: 1.5em; color: #666; margin-top: 50px;">調理待ちの注文はありません</div>' : 
                 ''}
         </div>
     `;
@@ -537,7 +668,7 @@ function renderPickupPage() {
                     `;
                 }).join('')}
             </div>
-            ${pickupOrders.length === 0 ? '<p>🎉 品出し待ちの注文はありません</p>' : ''}
+            ${pickupOrders.length === 0 ? '<p>品出し待ちの注文はありません</p>' : ''}
         </div>
     `;
 }
@@ -546,7 +677,6 @@ function renderSettingsPage() {
     if (!state.data) {
         return '<div class="card"><h2>⚙️ システム設定</h2><p>データ読込中...</p></div>';
     }
-    
     const tabNav = `
         <nav class="nav" style="margin-bottom: 20px;">
             <button class="nav-btn ${state.settingsTab === 'main' ? 'active' : ''}" onclick="switchSettingsTab('main')">メイン商品</button>
@@ -708,98 +838,160 @@ function renderSettingsPage() {
             </div>
         `;
     } else if (state.settingsTab === 'sales') {
-        const salesStats = calculateSalesStats();
-        
-        tabContent = `
-            <div class="card">
-                <h3>売上確認 - 現在のセッション</h3>
-                
-                <!-- 全体統計 -->
-                <div class="sales-overview" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0;">
-                    <div class="stat-card" style="background: #e3f2fd; padding: 15px; border-radius: 8px; text-align: center;">
-                        <h4 style="margin: 0 0 10px 0; color: #1976d2;">総注文数</h4>
-                        <div style="font-size: 2em; font-weight: bold; color: #1976d2;">${salesStats.totalOrders}</div>
-                        <small style="color: #666;">件</small>
-                    </div>
-                    <div class="stat-card" style="background: #e8f5e8; padding: 15px; border-radius: 8px; text-align: center;">
-                        <h4 style="margin: 0 0 10px 0; color: #388e3c;">総売上</h4>
-                        <div style="font-size: 2em; font-weight: bold; color: #388e3c;">¥${salesStats.totalRevenue.toLocaleString()}</div>
-                        <small style="color: #666;">円</small>
-                    </div>
-                    <div class="stat-card" style="background: #fff3e0; padding: 15px; border-radius: 8px; text-align: center;">
-                        <h4 style="margin: 0 0 10px 0; color: #f57c00;">平均単価</h4>
-                        <div style="font-size: 2em; font-weight: bold; color: #f57c00;">¥${salesStats.averageOrder.toLocaleString()}</div>
-                        <small style="color: #666;">円</small>
-                    </div>
-                    <div class="stat-card" style="background: #fce4ec; padding: 15px; border-radius: 8px; text-align: center;">
-                        <h4 style="margin: 0 0 10px 0; color: #c2185b;">総商品数</h4>
-                        <div style="font-size: 2em; font-weight: bold; color: #c2185b;">${salesStats.totalItems}</div>
-                        <small style="color: #666;">個</small>
-                    </div>
+        if (state.archived.loading) {
+            tabContent = `
+                <div class="card">
+                    <h3>売上確認</h3>
+                    <p>アーカイブ注文を読込中...</p>
                 </div>
-                
-                <!-- 商品別売上 -->
-                <div style="margin: 30px 0;">
-                    <h4>📈 商品別売上統計</h4>
-                    <div class="sales-table" style="overflow-x: auto;">
-                        <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
-                            <thead>
-                                <tr style="background: #f5f5f5;">
-                                    <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">商品名</th>
-                                    <th style="padding: 10px; border: 1px solid #ddd; text-align: center;">販売数</th>
-                                    <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">売上金額</th>
-                                    <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">構成比</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${salesStats.itemStats.map(item => `
-                                    <tr>
-                                        <td style="padding: 10px; border: 1px solid #ddd;">${item.name}</td>
-                                        <td style="padding: 10px; border: 1px solid #ddd; text-align: center; font-weight: bold;">${item.quantity}</td>
-                                        <td style="padding: 10px; border: 1px solid #ddd; text-align: right; font-weight: bold;">¥${item.revenue.toLocaleString()}</td>
-                                        <td style="padding: 10px; border: 1px solid #ddd; text-align: right;">${item.percentage.toFixed(1)}%</td>
+            `;
+        } else if (state.archived.error) {
+            tabContent = `
+                <div class="card">
+                    <h3>売上確認</h3>
+                    <p style="color:#d32f2f;">アーカイブ読込に失敗しました: ${state.archived.error}</p>
+                    <button class="btn btn-primary" onclick="ensureArchivedOrders(true)">再試行</button>
+                </div>
+            `;
+        } else {
+            const salesStats = calculateSalesStats();
+            const archivedOrders = [...state.archived.orders]
+                .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0))
+                .slice(0, 20);
+
+            tabContent = `
+                <div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+                        <h3 style="margin: 0;">売上確認</h3>
+                        <button class="btn btn-primary" onclick="refreshSalesStats()" style="font-size: 0.95em; padding: 8px 14px;">
+                            🔄 売上データ更新
+                        </button>
+                    </div>
+
+                    <!-- 全体統計 -->
+                    <div class="sales-overview" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0;">
+                        <div class="stat-card" style="background: #e3f2fd; padding: 15px; border-radius: 8px; text-align: center;">
+                            <h4 style="margin: 0 0 10px 0; color: #1976d2;">総注文数</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #1976d2;">${salesStats.totalOrders}</div>
+                            <small style="color: #666;">件</small>
+                        </div>
+                        <div class="stat-card" style="background: #e8f5e8; padding: 15px; border-radius: 8px; text-align: center;">
+                            <h4 style="margin: 0 0 10px 0; color: #388e3c;">総売上</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #388e3c;">¥${salesStats.totalRevenue.toLocaleString()}</div>
+                            <small style="color: #666;">円</small>
+                        </div>
+                        <div class="stat-card" style="background: #fff3e0; padding: 15px; border-radius: 8px; text-align: center;">
+                            <h4 style="margin: 0 0 10px 0; color: #f57c00;">平均単価</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #f57c00;">¥${salesStats.averageOrder.toLocaleString()}</div>
+                            <small style="color: #666;">円</small>
+                        </div>
+                        <div class="stat-card" style="background: #fce4ec; padding: 15px; border-radius: 8px; text-align: center;">
+                            <h4 style="margin: 0 0 10px 0; color: #c2185b;">総商品数</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #c2185b;">${salesStats.totalItems}</div>
+                            <small style="color: #666;">個</small>
+                        </div>
+                        <div class="stat-card" style="background: #ede7f6; padding: 15px; border-radius: 8px; text-align: center;">
+                            <h4 style="margin: 0 0 10px 0; color: #5e35b1;">ちんちろ調整累計</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #5e35b1;">¥${salesStats.chinchiroAdjustments.total.toLocaleString()}</div>
+                            <small style="color: #666;">+¥${salesStats.chinchiroAdjustments.positive.toLocaleString()} / -¥${Math.abs(salesStats.chinchiroAdjustments.negative).toLocaleString()}</small>
+                        </div>
+                    </div>
+                    
+                    <!-- 商品別売上 -->
+                    <div style="margin: 30px 0;">
+                        <h4>📈 商品別売上統計</h4>
+                        <div class="sales-table" style="overflow-x: auto;">
+                            <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+                                <thead>
+                                    <tr style="background: #f5f5f5;">
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">商品名</th>
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: center;">販売数</th>
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">売上金額</th>
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">構成比</th>
                                     </tr>
-                                `).join('')}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                
-                <!-- 注文状況 -->
-                <div style="margin: 30px 0;">
-                    <h4>📋 注文状況内訳</h4>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 15px;">
-                        <div style="background: #fff9c4; padding: 10px; border-radius: 5px; text-align: center;">
-                            <div style="font-weight: bold; color: #f57c00;">調理中</div>
-                            <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.COOKING || 0}</div>
-                        </div>
-                        <div style="background: #c8e6c9; padding: 10px; border-radius: 5px; text-align: center;">
-                            <div style="font-weight: bold; color: #388e3c;">調理完了</div>
-                            <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.DONE || 0}</div>
-                        </div>
-                        <div style="background: #b3e5fc; padding: 10px; border-radius: 5px; text-align: center;">
-                            <div style="font-weight: bold; color: #0277bd;">品出し完了</div>
-                            <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.READY || 0}</div>
-                        </div>
-                        <div style="background: #e1bee7; padding: 10px; border-radius: 5px; text-align: center;">
-                            <div style="font-weight: bold; color: #7b1fa2;">提供済み</div>
-                            <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.DELIVERED || 0}</div>
-                        </div>
-                        <div style="background: #ffcdd2; padding: 10px; border-radius: 5px; text-align: center;">
-                            <div style="font-weight: bold; color: #d32f2f;">キャンセル</div>
-                            <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.CANCELLED || 0}</div>
+                                </thead>
+                                <tbody>
+                                    ${salesStats.itemStats.map(item => `
+                                        <tr>
+                                            <td style="padding: 10px; border: 1px solid #ddd;">${item.name}</td>
+                                            <td style="padding: 10px; border: 1px solid #ddd; text-align: center; font-weight: bold;">${item.quantity}</td>
+                                            <td style="padding: 10px; border: 1px solid #ddd; text-align: right; font-weight: bold;">¥${item.revenue.toLocaleString()}</td>
+                                            <td style="padding: 10px; border: 1px solid #ddd; text-align: right;">${item.percentage.toFixed(1)}%</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
                         </div>
                     </div>
+                    
+                    <!-- 注文状況 -->
+                    <div style="margin: 30px 0;">
+                        <h4>📋 注文状況内訳</h4>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 15px;">
+                            <div style="background: #fff9c4; padding: 10px; border-radius: 5px; text-align: center;">
+                                <div style="font-weight: bold; color: #f57c00;">調理中</div>
+                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.COOKING || 0}</div>
+                            </div>
+                            <div style="background: #c8e6c9; padding: 10px; border-radius: 5px; text-align: center;">
+                                <div style="font-weight: bold; color: #388e3c;">調理完了</div>
+                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.DONE || 0}</div>
+                            </div>
+                            <div style="background: #b3e5fc; padding: 10px; border-radius: 5px; text-align: center;">
+                                <div style="font-weight: bold; color: #0277bd;">品出し完了</div>
+                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.READY || 0}</div>
+                            </div>
+                            <div style="background: #e1bee7; padding: 10px; border-radius: 5px; text-align: center;">
+                                <div style="font-weight: bold; color: #7b1fa2;">提供済み</div>
+                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.DELIVERED || 0}</div>
+                            </div>
+                            <div style="background: #ffcdd2; padding: 10px; border-radius: 5px; text-align: center;">
+                                <div style="font-weight: bold; color: #d32f2f;">キャンセル</div>
+                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.CANCELLED || 0}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="margin: 30px 0;">
+                        <h4>🗂️ 最近アーカイブ済み注文</h4>
+                        ${archivedOrders.length === 0 ? '<p>品出し済みの注文はまだありません</p>' : `
+                        <div style="overflow-x: auto;">
+                            <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+                                <thead>
+                                    <tr style="background: #f5f5f5;">
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">注文番号</th>
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">最終状態</th>
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">金額</th>
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">アーカイブ時刻</th>
+                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">内容</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${archivedOrders.map(order => {
+                                        const total = calculateOrderTotal(order);
+                                        const status = getStatusLabel(order.status || 'UNKNOWN');
+                                        const when = formatArchivedTimestamp(order.archivedAt);
+                                        const itemsText = order.items
+                                            .map(item => `${item.name}×${item.qty}`)
+                                            .join(' / ');
+                                        return `
+                                            <tr>
+                                                <td style="padding: 10px; border: 1px solid #ddd;">#${order.orderNo}</td>
+                                                <td style="padding: 10px; border: 1px solid #ddd;">${status}</td>
+                                                <td style="padding: 10px; border: 1px solid #ddd; text-align: right; font-weight: bold;">¥${total.toLocaleString()}</td>
+                                                <td style="padding: 10px; border: 1px solid #ddd;">${when}</td>
+                                                <td style="padding: 10px; border: 1px solid #ddd;">${itemsText}</td>
+                                            </tr>
+                                        `;
+                                    }).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                        `}
+                    </div>
+                    
                 </div>
-                
-                <!-- 更新ボタン -->
-                <div style="text-align: center; margin-top: 30px;">
-                    <button class="btn btn-primary" onclick="refreshSalesStats()" style="font-size: 1.1em; padding: 10px 20px;">
-                        🔄 売上データ更新
-                    </button>
-                </div>
-            </div>
-        `;
+            `;
+        }
     } else if (state.settingsTab === 'chinchiro') {
         tabContent = `
             <div class="card">
@@ -977,6 +1169,21 @@ function renderExportPage() {
                 <button class="btn btn-warning btn-large" onclick="restoreLatest()" style="flex: 1; min-width: 200px; font-size: 1.2em; padding: 15px 25px;">
                     復旧ボタン
                 </button>
+                <button class="btn btn-info btn-large" onclick="downloadSnapshotJson()" style="flex: 1; min-width: 200px; font-size: 1.2em; padding: 15px 25px;">
+                    スナップショット確認
+                </button>
+            </div>
+            <div class="memory-monitor" style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                <h3 style="margin-bottom: 10px;">メモリ使用状況</h3>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="font-size: 1.6em; font-weight: bold; color: #007bff;">
+                        空きメモリ容量: <span id="memory-free-heap">-- KB</span>
+                    </div>
+                    <div style="color: #666;">最小空き: <span id="memory-min-heap">-- KB</span></div>
+                    <div style="color: #666;">最大連続割当: <span id="memory-max-alloc">-- KB</span></div>
+                    <div style="color: #999; font-size: 0.9em;">最終更新: <span id="memory-last-updated">--:--:--</span></div>
+                    <div id="memory-status-message" style="color: #d32f2f; font-size: 0.9em;"></div>
+                </div>
             </div>
             
             <div id="api-result" style="margin-top: 20px;"></div>
@@ -995,6 +1202,83 @@ function setupPageEvents() {
     }
     if (state.page === 'pickup') {
         document.addEventListener('click', handlePickupButtonClick);
+    }
+    if (state.page === 'export') {
+        startMemoryMonitor();
+    } else {
+        stopMemoryMonitor();
+    }
+    if (state.settingsTab === 'sales') {
+        ensureArchivedOrders();
+    }
+}
+
+async function updateMemoryStatus() {
+    const freeElem = document.getElementById('memory-free-heap');
+    if (!freeElem) {
+        return;
+    }
+
+    const minElem = document.getElementById('memory-min-heap');
+    const maxElem = document.getElementById('memory-max-alloc');
+    const updatedElem = document.getElementById('memory-last-updated');
+    const messageElem = document.getElementById('memory-status-message');
+
+    try {
+        const response = await fetch('/api/system/memory');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const freeHeap = data.freeHeap ?? data.free_heap ?? 0;
+        const minHeap = data.minFreeHeap ?? data.min_free_heap ?? null;
+        const maxAlloc = data.maxAllocHeap ?? data.max_alloc_heap ?? null;
+
+        const formatKb = value => `${Math.round(value / 1024)} KB`;
+
+        freeElem.textContent = formatKb(freeHeap);
+        if (minElem && minHeap != null) {
+            minElem.textContent = formatKb(minHeap);
+        }
+        if (maxElem && maxAlloc != null) {
+            maxElem.textContent = formatKb(maxAlloc);
+        }
+        if (updatedElem) {
+            const now = new Date();
+            updatedElem.textContent = now.toLocaleTimeString('ja-JP');
+            state.memory = {
+                freeHeap,
+                minHeap,
+                maxAlloc,
+                updatedAt: now
+            };
+        }
+        if (messageElem) {
+            messageElem.textContent = '';
+        }
+    } catch (error) {
+        console.error('メモリ情報取得エラー:', error);
+        freeElem.textContent = '取得エラー';
+        if (minElem) minElem.textContent = '-- KB';
+        if (maxElem) maxElem.textContent = '-- KB';
+        if (messageElem) {
+            messageElem.textContent = `メモリ情報の取得に失敗しました: ${error.message}`;
+        }
+    }
+}
+
+function startMemoryMonitor() {
+    updateMemoryStatus();
+    if (memoryMonitorTimer) {
+        clearInterval(memoryMonitorTimer);
+    }
+    memoryMonitorTimer = setInterval(updateMemoryStatus, 20000);
+}
+
+function stopMemoryMonitor() {
+    if (memoryMonitorTimer) {
+        clearInterval(memoryMonitorTimer);
+        memoryMonitorTimer = null;
     }
 }
 
@@ -1141,7 +1425,7 @@ function showSideSelectModal(mainSku, priceMode) {
             <div class="modal-content" onclick="event.stopPropagation()" style="max-width: 600px;">
                 <div class="card">
                     <div class="modal-header">
-                        <h3>🍟 サイド商品を選択</h3>
+                        <h3>サイド商品を選択</h3>
                         <button class="btn-close" onclick="closeSideSelectModal()">&times;</button>
                     </div>
                     <div class="modal-body">
@@ -1313,13 +1597,13 @@ function updateCartDisplay() {
                     mainItem.price_normal + mainItem.presale_discount_amount : 
                     mainItem.price_normal;
                 itemTotal += mainPrice;
-                description = `🍔 ${mainItem.name} (${cartItem.priceMode === 'presale' ? '前売' : '通常'})`;
+                description = ` ${mainItem.name} (${cartItem.priceMode === 'presale' ? '前売' : '通常'})`;
                 
                 cartItem.sideSkus.forEach(sideSku => {
                     const sideItem = state.data.menu.find(item => item.sku === sideSku);
                     if (sideItem) {
                         itemTotal += sideItem.price_as_side;
-                        description += ` + 🍟 ${sideItem.name}`;
+                        description += ` +  ${sideItem.name}`;
                     }
                 });
             }
@@ -1559,21 +1843,18 @@ async function submitOrder() {
 async function cancelOrder(orderNo) {
     console.log('[cancelOrder] 開始: 注文番号=', orderNo, 'タイプ=', typeof orderNo);
     
-    // 注文の存在確認
-    if (state.data && state.data.orders) {
-        const order = state.data.orders.find(o => o.orderNo === orderNo);
-        console.log('[cancelOrder] 注文データ検索結果:', order);
-        if (order) {
-            console.log('[cancelOrder] 注文詳細:', {
-                orderNo: order.orderNo,
-                status: order.status,
-                itemCount: order.items ? order.items.length : 0
-            });
-        } else {
-            console.error('[cancelOrder] 注文が見つかりません:', orderNo);
-            alert(`❌ 注文 #${orderNo} が見つかりません`);
-            return;
-        }
+    const resolved = getOrderFromState(orderNo);
+    if (!resolved) {
+        console.error('[cancelOrder] 注文が見つかりません:', orderNo);
+        alert(`❌ 注文 #${orderNo} が見つかりません`);
+        return;
+    }
+
+    const { order, source } = resolved;
+    console.log('[cancelOrder] 注文データ検索結果:', { ...order, __source: source });
+    if (order.status === 'CANCELLED') {
+        alert(`❌ 注文 #${orderNo} は既にキャンセル済みです`);
+        return;
     }
     
     // キャンセル理由を入力
@@ -1605,6 +1886,7 @@ async function cancelOrder(orderNo) {
             alert(`✅ 注文 #${orderNo} をキャンセルしました`);
             // 画面を更新
             await loadStateData();
+            ensureArchivedOrders(true);
         } else {
             // エラーレスポンスの処理
             let errorMessage = `HTTP ${response.status}`;
@@ -1645,6 +1927,9 @@ async function completeOrder(orderNo) {
 
 function switchSettingsTab(tab) {
     state.settingsTab = tab;
+    if (tab === 'sales') {
+        ensureArchivedOrders();
+    }
     render();
 }
 
@@ -1991,6 +2276,10 @@ async function downloadCsv() {
     }
 }
 
+function downloadSnapshotJson() {
+    window.open('/api/export/snapshot', '_blank');
+}
+
 function showSessionEndDialog() {
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
@@ -2127,9 +2416,11 @@ async function restoreLatest() {
 
 function showOrderDetail(orderNo) {
     if (!state.data) return;
-    
-    const order = state.data.orders.find(o => o.orderNo === orderNo);
-    if (!order) return;
+
+    const resolved = getOrderFromState(orderNo);
+    if (!resolved) return;
+
+    const { order, source } = resolved;
     
     const totalAmount = order.items.reduce((sum, item) => {
         const unitPrice = item.unitPriceApplied || item.unitPrice || 0;
@@ -2164,6 +2455,7 @@ function showOrderDetail(orderNo) {
                     <div class="modal-body">
                         <p><strong>状態:</strong> ${getStatusLabel(order.status)}</p>
                         <p><strong>注文時刻:</strong> ${order.ts && order.ts > 946684800 ? new Date(order.ts * 1000).toLocaleString() : '時刻不明'}</p>
+                        <p><strong>ソース:</strong> ${source === 'archived' ? 'アーカイブ' : 'リアルタイム'}</p>
                         <div class="order-items">
                             <h4>注文内容</h4>
                             ${itemsList}
@@ -2307,17 +2599,41 @@ function toggleCompletedOrders() {
         loadCompletedOrders();
     } else {
         widget.style.display = 'none';
-        button.textContent = '📋 注文済み一覧表示';
+        button.textContent = '📋 キャンセル・再印刷';
     }
 }
 
 function loadCompletedOrders() {
     if (!state.data) return;
-    
-    const completedOrders = state.data.orders
+
+    ensureArchivedOrders();
+
+    const merged = new Map();
+
+    if (state.archived && Array.isArray(state.archived.orders)) {
+        state.archived.orders.forEach(order => {
+            if (!order || !order.orderNo) {
+                return;
+            }
+            if (!merged.has(order.orderNo)) {
+                merged.set(order.orderNo, { ...order, __source: 'archived' });
+            }
+        });
+    }
+
+    if (state.data && Array.isArray(state.data.orders)) {
+        state.data.orders.forEach(order => {
+            if (!order || !order.orderNo) {
+                return;
+            }
+            merged.set(order.orderNo, { ...order, __source: 'active' });
+        });
+    }
+
+    const completedOrders = Array.from(merged.values())
         .filter(order => ['COOKING', 'DONE', 'READY', 'DELIVERED', 'CANCELLED'].includes(order.status))
-        .sort((a, b) => b.ts - a.ts) 
-        .slice(0, 20); 
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+        .slice(0, 20);
     
     const listDiv = document.getElementById('completed-orders-list');
     
@@ -2331,18 +2647,23 @@ function loadCompletedOrders() {
         const statusColor = getStatusColor(order.status);
         const timeStr = order.ts && order.ts > 946684800 ? 
             new Date(order.ts * 1000).toLocaleString() : '時刻不明';
-        
-        const totalAmount = order.items.reduce((sum, item) => {
+        const sourceBadge = order.__source === 'archived' ? '<span class="tag" style="background:#6c757d;color:#fff;padding:2px 6px;border-radius:3px;font-size:0.7em;">ARCHIVE</span>' : '';
+
+        const items = Array.isArray(order.items) ? order.items : [];
+        const totalAmount = items.reduce((sum, item) => {
             const unitPrice = item.unitPriceApplied || item.unitPrice || 0;
             const qty = item.qty || 1;
             const discount = item.discountValue || 0;
             return sum + (unitPrice * qty - discount);
         }, 0);
         
+        const allowReprint = order.status !== 'CANCELLED';
+        const allowCancel = ['COOKING', 'DONE', 'READY', 'DELIVERED'].includes(order.status);
+
         return `
             <div class="completed-order-item" style="border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 5px;">
                 <div class="order-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <h4 style="margin: 0; color: #333;">注文 #${order.orderNo}</h4>
+                    <h4 style="margin: 0; color: #333;">注文 #${order.orderNo} ${sourceBadge}</h4>
                     <span class="status-badge" style="background-color: ${statusColor}; color: white; padding: 4px 8px; border-radius: 3px; font-size: 0.8em;">
                         ${statusLabel}
                     </span>
@@ -2352,22 +2673,22 @@ function loadCompletedOrders() {
                     <div>合計金額: ${totalAmount}円</div>
                 </div>
                 <div class="order-items" style="margin-bottom: 15px;">
-                    ${order.items.slice(0, 3).map(item => 
+                    ${items.slice(0, 3).map(item => 
                         `<span style="background: #f8f9fa; padding: 2px 6px; margin: 2px; border-radius: 3px; font-size: 0.8em; display: inline-block;">
                             ${item.name} x${item.qty}
                         </span>`
                     ).join('')}
-                    ${order.items.length > 3 ? '<span style="color: #666;">...</span>' : ''}
+                    ${items.length > 3 ? '<span style="color: #666;">...</span>' : ''}
                 </div>
                 <div class="order-actions" style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn btn-sm btn-info" onclick="showOrderDetail('${order.orderNo}')" style="font-size: 0.8em;">
                         📄 詳細
                     </button>
-                    ${order.status !== 'CANCELLED' ? `
+                    ${allowReprint ? `
                     <button class="btn btn-sm btn-secondary" onclick="reprintReceipt('${order.orderNo}')" style="font-size: 0.8em;">
                         🖨️ 再印刷
                     </button>` : ''}
-                    ${['COOKING', 'DONE'].includes(order.status) ? `
+                    ${allowCancel ? `
                     <button class="btn btn-sm btn-warning" onclick="cancelOrder('${order.orderNo}')" style="font-size: 0.8em;">
                         ❌ キャンセル
                     </button>` : ''}
@@ -2397,28 +2718,44 @@ function calculateSalesStats() {
             averageOrder: 0,
             totalItems: 0,
             itemStats: [],
-            statusCounts: {}
+            statusCounts: {},
+            chinchiroAdjustments: { total: 0, positive: 0, negative: 0, count: 0 }
         };
     }
     
-    const orders = state.data.orders.filter(order => order.status !== 'CANCELLED');
+    const inMemoryOrders = state.data.orders.filter(order => order.status !== 'CANCELLED');
+    const archivedOrders = state.archived.orders.filter(order => order.status !== 'CANCELLED');
+    const orders = [...inMemoryOrders, ...archivedOrders];
     const itemMap = new Map();
     const statusCounts = {};
+    const chinchiroAdjustments = { total: 0, positive: 0, negative: 0, count: 0 };
     
     let totalRevenue = 0;
     let totalItems = 0;
+    let productsRevenue = 0;
 
     orders.forEach(order => {
         statusCounts[order.status] = (statusCounts[order.status] || 0) + 1;
         order.items.forEach(item => {
-            if (item.kind === "ADJUST") return;
-            
             const unitPrice = item.unitPriceApplied || item.unitPrice || 0;
             const qty = item.qty || 1;
             const discount = item.discountValue || 0;
             const itemTotal = (unitPrice * qty) - discount;
+
+            if (item.kind === "ADJUST") {
+                totalRevenue += itemTotal;
+                chinchiroAdjustments.total += itemTotal;
+                if (itemTotal > 0) {
+                    chinchiroAdjustments.positive += itemTotal;
+                } else if (itemTotal < 0) {
+                    chinchiroAdjustments.negative += itemTotal;
+                }
+                chinchiroAdjustments.count += qty;
+                return;
+            }
             
             totalRevenue += itemTotal;
+            productsRevenue += itemTotal;
             totalItems += qty;
             
             const itemName = item.name;
@@ -2440,7 +2777,7 @@ function calculateSalesStats() {
         .sort((a, b) => b.revenue - a.revenue)
         .map(item => ({
             ...item,
-            percentage: totalRevenue > 0 ? (item.revenue / totalRevenue) * 100 : 0
+            percentage: productsRevenue > 0 ? (item.revenue / productsRevenue) * 100 : 0
         }));
     
     const averageOrder = orders.length > 0 ? Math.round(totalRevenue / orders.length) : 0;
@@ -2451,12 +2788,14 @@ function calculateSalesStats() {
         averageOrder: averageOrder,
         totalItems: totalItems,
         itemStats: itemStats,
-        statusCounts: statusCounts
+        statusCounts: statusCounts,
+        chinchiroAdjustments: chinchiroAdjustments
     };
 }
 
 function refreshSalesStats() {
     if (state.settingsTab === 'sales') {
+        ensureArchivedOrders(true);
         render(); 
     }
 }
@@ -2470,27 +2809,18 @@ async function reprintReceipt(orderNo) {
         return;
     }
     
-    // 注文の存在確認
-    if (state.data && state.data.orders) {
-        const order = state.data.orders.find(o => o.orderNo === orderNo);
-        console.log('[reprintReceipt] 注文データ検索結果:', order);
-        if (order) {
-            console.log('[reprintReceipt] 注文詳細:', {
-                orderNo: order.orderNo,
-                status: order.status,
-                itemCount: order.items ? order.items.length : 0
-            });
-            
-            // キャンセル済み注文は再印刷不可
-            if (order.status === 'CANCELLED') {
-                alert(`❌ キャンセル済みの注文は再印刷できません\n注文番号: ${orderNo}`);
-                return;
-            }
-        } else {
-            console.error('[reprintReceipt] 注文が見つかりません:', orderNo);
-            alert(`❌ 注文 #${orderNo} が見つかりません`);
-            return;
-        }
+    const resolved = getOrderFromState(orderNo);
+    if (!resolved) {
+        console.error('[reprintReceipt] 注文が見つかりません:', orderNo);
+        alert(`❌ 注文 #${orderNo} が見つかりません`);
+        return;
+    }
+
+    const { order, source } = resolved;
+    console.log('[reprintReceipt] 注文データ検索結果:', { ...order, __source: source });
+    if (order.status === 'CANCELLED') {
+        alert(`❌ キャンセル済みの注文は再印刷できません\n注文番号: ${orderNo}`);
+        return;
     }
     
     try {

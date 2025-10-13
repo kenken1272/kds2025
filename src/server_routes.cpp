@@ -6,11 +6,53 @@
 #include "ws_hub.h"
 #include "printer_render.h"
 
+#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <time.h>
 #include <sys/time.h>
 #include <Preferences.h>
+
+static void fillOrderJson(JsonObject obj, const Order& order) {
+  obj["orderNo"] = order.orderNo;
+  obj["status"] = order.status;
+  obj["ts"] = order.ts;
+  obj["printed"] = order.printed;
+  obj["cooked"] = order.cooked;
+  obj["pickup_called"] = order.pickup_called;
+  obj["picked_up"] = order.picked_up;
+  if (!order.cancelReason.isEmpty()) {
+    obj["cancelReason"] = order.cancelReason;
+  }
+
+  JsonArray itemsArray = obj["items"].to<JsonArray>();
+  for (const auto& item : order.items) {
+    JsonObject j = itemsArray.add<JsonObject>();
+    j["sku"] = item.sku;
+    j["name"] = item.name;
+    j["qty"] = item.qty;
+    j["unitPriceApplied"] = item.unitPriceApplied;
+    j["priceMode"] = item.priceMode;
+    j["kind"] = item.kind;
+    j["unitPrice"] = item.unitPrice;
+    if (!item.discountName.isEmpty()) {
+      j["discountName"] = item.discountName;
+      j["discountValue"] = item.discountValue;
+    }
+  }
+}
+
+struct ArchiveStreamContext {
+  AsyncResponseStream* stream;
+  const String* sessionFilter;
+  bool first;
+
+  ArchiveStreamContext()
+    : stream(nullptr), sessionFilter(nullptr), first(true) {}
+
+  ArchiveStreamContext(AsyncResponseStream* s, const String* filter, bool isFirst)
+    : stream(s), sessionFilter(filter), first(isFirst) {}
+};
 
 void initHttpRoutes(AsyncWebServer &server) {
   server.on("/api/ping", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -63,32 +105,7 @@ void initHttpRoutes(AsyncWebServer &server) {
     JsonArray ordersArray = doc["orders"].to<JsonArray>();
     for (const auto& od : S().orders) {
       JsonObject o = ordersArray.add<JsonObject>();
-      o["orderNo"] = od.orderNo;
-      o["status"]  = od.status;
-      o["ts"]      = od.ts;
-      o["printed"] = od.printed;
-      o["cooked"] = od.cooked;
-      o["pickup_called"] = od.pickup_called;
-      o["picked_up"] = od.picked_up;
-      if (!od.cancelReason.isEmpty()) {
-        o["cancelReason"] = od.cancelReason;
-      }
-
-      JsonArray itemsArray = o["items"].to<JsonArray>();
-      for (const auto& item : od.items) {
-        JsonObject j = itemsArray.add<JsonObject>();
-        j["sku"]  = item.sku;
-        j["name"] = item.name;
-        j["qty"]  = item.qty;
-        j["unitPriceApplied"] = item.unitPriceApplied;
-        j["priceMode"] = item.priceMode;
-        j["kind"] = item.kind;
-        j["unitPrice"] = item.unitPrice;
-        if (!item.discountName.isEmpty()) {
-          j["discountName"] = item.discountName;
-          j["discountValue"] = item.discountValue;
-        }
-      }
+      fillOrderJson(o, od);
     }
 
     String res; serializeJson(doc, res);
@@ -137,7 +154,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       }
       // WAL記録（JSON形式）
       for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
-        JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
         walDoc["ts"] = (uint32_t)time(nullptr);
         walDoc["action"] = "MAIN_UPSERT";
         walDoc["sku"] = v["id"] | "";
@@ -195,7 +212,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       }
       // WAL記録（JSON形式）
       for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
-        JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
         walDoc["ts"] = (uint32_t)time(nullptr);
         walDoc["action"] = "SIDE_UPSERT";
         walDoc["sku"] = v["id"] | "";
@@ -231,7 +248,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       }
 
       // WAL記録（JSON形式）
-      JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
       walDoc["ts"] = (uint32_t)time(nullptr);
       walDoc["action"] = "SETTINGS_UPDATE";
       walDoc["chinchiro"]["enabled"] = S().settings.chinchiro.enabled;
@@ -263,7 +280,7 @@ void initHttpRoutes(AsyncWebServer &server) {
                     S().settings.qrPrint.enabled, S().settings.qrPrint.content.c_str());
 
       // WAL記録（JSON形式）
-      JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
       walDoc["ts"] = (uint32_t)time(nullptr);
       walDoc["action"] = "SETTINGS_UPDATE";
       walDoc["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
@@ -360,12 +377,12 @@ void initHttpRoutes(AsyncWebServer &server) {
           i+1, it.name.c_str(), it.qty, it.unitPriceApplied, it.kind.c_str());
       }
 
-      S().orders.push_back(order);
+    S().orders.push_back(order);
       
-      JsonDocument walDoc;
+    DynamicJsonDocument walDoc(4096);
       walDoc["ts"] = (uint32_t)time(nullptr);
       walDoc["action"] = "ORDER_CREATE";
-  walDoc["orderNo"] = order.orderNo;
+    walDoc["orderNo"] = order.orderNo;
       orderToJson(walDoc.createNestedObject("order"), order);
 
       String walLine; serializeJson(walDoc, walLine);
@@ -415,7 +432,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       // WAL記録（JSON形式）
       for (const auto& o : S().orders) {
         if (o.orderNo == orderNo) {
-          JsonDocument walDoc;
+          StaticJsonDocument<512> walDoc;
           walDoc["ts"] = (uint32_t)time(nullptr);
           walDoc["action"] = "ORDER_UPDATE";
           walDoc["orderNo"] = orderNo;
@@ -445,19 +462,32 @@ void initHttpRoutes(AsyncWebServer &server) {
     }
     String orderNo = request->getParam("orderNo")->value();
 
-    Order* found = nullptr;
-    for (auto& o : S().orders) if (o.orderNo == orderNo) { found = &o; break; }
-    if (!found) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
+    Order orderData;
+    bool found = false;
+    for (auto& o : S().orders) {
+      if (o.orderNo == orderNo) {
+        orderData = o;
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      if (!archiveFindOrder(S().session.sessionId, orderNo, orderData)) {
+        request->send(404, "application/json", "{\"error\":\"Order not found\"}");
+        return;
+      }
+    }
 
     JsonDocument res;
-    res["orderNo"] = found->orderNo;
-    res["status"]  = found->status;
-    res["ts"]      = found->ts;
-    res["printed"] = found->printed;
+    res["orderNo"] = orderData.orderNo;
+    res["status"]  = orderData.status;
+    res["ts"]      = orderData.ts;
+    res["printed"] = orderData.printed;
 
     JsonArray items = res["items"].to<JsonArray>();
     int total=0;
-    for (const auto& it : found->items) {
+    for (const auto& it : orderData.items) {
       JsonObject j = items.add<JsonObject>();
       j["sku"]   = it.sku;
       j["name"]  = it.name;
@@ -493,39 +523,77 @@ void initHttpRoutes(AsyncWebServer &server) {
     Serial.printf("[API] キャンセル対象: 注文番号=%s, 理由=%s\n", orderNo.c_str(), reason.c_str());
     Serial.printf("[API] 現在の注文数: %d件\n", S().orders.size());
 
-    bool found=false;
+    Order* activeOrder = nullptr;
     for (auto& o : S().orders) {
-      if (o.orderNo == orderNo) { 
-        Serial.printf("[API] ✅ 注文発見: %s (status=%s → CANCELLED)\n", o.orderNo.c_str(), o.status.c_str());
-        o.status="CANCELLED"; 
-        o.cancelReason=reason; 
-        found=true; 
-        break; 
+      if (o.orderNo == orderNo) {
+        activeOrder = &o;
+        break;
       }
     }
-    
-    if (!found) { 
-      Serial.printf("[API] ❌ エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
-      request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
-      return; 
+
+    Order archivedOrder;
+    uint32_t archivedAtTs = 0;
+    bool fromArchive = false;
+
+    if (!activeOrder) {
+      if (archiveFindOrder(S().session.sessionId, orderNo, archivedOrder, &archivedAtTs)) {
+        fromArchive = true;
+        activeOrder = &archivedOrder;
+        Serial.printf("[API] ✅ アーカイブ注文発見: %s (archivedAt=%u)\n", orderNo.c_str(), archivedAtTs);
+      }
     }
 
-    // WAL記録（JSON形式）
-    JsonDocument walDoc;
+    if (!activeOrder) {
+      Serial.printf("[API] ❌ エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
+      request->send(404, "application/json", "{\"error\":\"Order not found\"}");
+      return;
+    }
+
+    if (activeOrder->status == "CANCELLED") {
+      Serial.printf("[API] ⚠️ 既にキャンセル済み: %s\n", orderNo.c_str());
+      request->send(400, "application/json", "{\"error\":\"Order already cancelled\"}");
+      return;
+    }
+
+    Serial.printf("[API] ✅ 注文発見: %s (status=%s → CANCELLED)\n", activeOrder->orderNo.c_str(), activeOrder->status.c_str());
+    activeOrder->status = "CANCELLED";
+    activeOrder->cancelReason = reason;
+
+    bool requireSnapshot = !fromArchive;
+
+    if (fromArchive) {
+      if (!archiveReplaceOrder(*activeOrder, S().session.sessionId, archivedAtTs)) {
+        Serial.printf("[API] ❌ アーカイブ更新失敗: %s\n", orderNo.c_str());
+        request->send(500, "application/json", "{\"error\":\"Failed to update archived order\"}");
+        return;
+      }
+    }
+
+  StaticJsonDocument<768> walDoc;
     walDoc["ts"] = (uint32_t)time(nullptr);
     walDoc["action"] = "ORDER_CANCEL";
     walDoc["orderNo"] = orderNo;
     walDoc["cancelReason"] = reason;
+    if (fromArchive) {
+      walDoc["archived"] = true;
+    }
     String walLine; serializeJson(walDoc, walLine);
     walAppend(walLine);
-    
-    snapshotSave();
+
+    if (requireSnapshot) {
+      snapshotSave();
+    }
 
     JsonDocument notify; notify["type"]="order.updated"; notify["orderNo"]=orderNo; notify["status"]="CANCELLED";
+    if (fromArchive) {
+      notify["archived"] = true;
+    }
     String msg; serializeJson(notify, msg); wsBroadcast(msg);
 
-    Serial.printf("[API] ✅ キャンセル完了: 注文番号 %s\n", orderNo.c_str());
-    request->send(200, "application/json", "{\"ok\":true}");
+    Serial.printf("[API] ✅ キャンセル完了: 注文番号 %s (archived=%d)\n", orderNo.c_str(), fromArchive ? 1 : 0);
+    JsonDocument res; res["ok"] = true; res["orderNo"] = orderNo; res["archived"] = fromArchive;
+    String out; serializeJson(res, out);
+    request->send(200, "application/json", out);
   });
 
   server.on("/api/orders/reprint", HTTP_POST, [](AsyncWebServerRequest *request){},
@@ -558,6 +626,16 @@ void initHttpRoutes(AsyncWebServer &server) {
           break; 
         }
       }
+
+      Order archivedFallback;
+
+      if (!found) {
+        uint32_t archivedAtTs = 0;
+        if (archiveFindOrder(S().session.sessionId, orderNo, archivedFallback, &archivedAtTs)) {
+          Serial.printf("[API] ✅ アーカイブ注文発見: %s (archivedAt=%u)\n", orderNo.c_str(), archivedAtTs);
+          found = &archivedFallback;
+        }
+      }
       
       if (!found) { 
         Serial.printf("[API] ❌ エラー: 注文番号 %s が見つからない\n", orderNo.c_str());
@@ -581,7 +659,11 @@ void initHttpRoutes(AsyncWebServer &server) {
       }
 
       Serial.printf("[API] 🖨️ レシート再印刷キュー追加: 注文番号 %s (%d件)\n", orderNo.c_str(), found->items.size());
-      enqueuePrint(*found);
+      if (found == &archivedFallback) {
+        enqueuePrint(archivedFallback);
+      } else {
+        enqueuePrint(*found);
+      }
 
       JsonDocument res; res["ok"]=true; res["orderNo"]=orderNo; res["message"]="Reprint job queued successfully";
       String out; serializeJson(res, out);
@@ -612,6 +694,112 @@ void initHttpRoutes(AsyncWebServer &server) {
 
   server.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     sendCsvStream(request);
+  });
+
+  server.on("/api/export/snapshot", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String json;
+    String path;
+    if (!getLatestSnapshotJson(json, path)) {
+      request->send(404, "application/json", "{\"error\":\"snapshot not found\"}");
+      return;
+    }
+
+    size_t baseSize = json.length();
+    DynamicJsonDocument snapDoc(baseSize + 16384);
+    DeserializationError err = deserializeJson(snapDoc, json);
+    String filename = path.endsWith("snapA.json") ? "snapshotA.json" : "snapshotB.json";
+    if (!err) {
+      snapDoc["generatedAt"] = static_cast<uint32_t>(time(nullptr));
+      String sessionId = S().session.sessionId;
+      JsonArray archivedArray = snapDoc["archivedOrders"].to<JsonArray>();
+
+      struct SnapshotArchiveContext {
+        JsonArray* array;
+        const String* sessionFilter;
+      } ctx;
+      ctx.array = &archivedArray;
+      ctx.sessionFilter = &sessionId;
+
+      auto visitor = [](const Order& order, const String& storedSession, uint32_t archivedAt, void* rawCtx) -> bool {
+        auto* context = static_cast<SnapshotArchiveContext*>(rawCtx);
+        if (!context || !context->array) {
+          return false;
+        }
+        if (context->sessionFilter && !context->sessionFilter->isEmpty() && storedSession != *context->sessionFilter) {
+          return true;
+        }
+        JsonObject obj = context->array->add<JsonObject>();
+        fillOrderJson(obj, order);
+        obj["archivedAt"] = archivedAt;
+        return true;
+      };
+
+      archiveForEach(sessionId, visitor, &ctx);
+
+      String out;
+      serializeJson(snapDoc, out);
+      AsyncWebServerResponse* response = request->beginResponse(200, "application/json", out);
+      response->addHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+      response->addHeader("X-Archive-Count", String(archivedArray.size()));
+      request->send(response);
+      return;
+    }
+
+    AsyncWebServerResponse* response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+    request->send(response);
+  });
+
+  server.on("/api/orders/archive", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String sessionId = request->hasParam("sessionId") ? request->getParam("sessionId")->value() : S().session.sessionId;
+    AsyncResponseStream* stream = request->beginResponseStream("application/json");
+    stream->print('{');
+    stream->print("\"sessionId\":\"");
+    stream->print(sessionId);
+    stream->print("\",\"orders\":[");
+
+  ArchiveStreamContext ctx;
+  ctx.stream = stream;
+  ctx.sessionFilter = &sessionId;
+  ctx.first = true;
+    auto visitor = [](const Order& order, const String& storedSession, uint32_t archivedAt, void* rawCtx) -> bool {
+      auto* context = static_cast<ArchiveStreamContext*>(rawCtx);
+      if (!context || !context->stream) {
+        return false;
+      }
+      if (context->sessionFilter && !context->sessionFilter->isEmpty() && storedSession != *context->sessionFilter) {
+        return true;
+      }
+      DynamicJsonDocument orderDoc(estimateOrderDocumentCapacity(order) + 128);
+      JsonObject obj = orderDoc.to<JsonObject>();
+      fillOrderJson(obj, order);
+      obj["archivedAt"] = archivedAt;
+      String json;
+      serializeJson(orderDoc, json);
+      if (!context->first) {
+        context->stream->print(',');
+      }
+      context->stream->print(json);
+      context->first = false;
+      return true;
+    };
+
+    archiveForEach(sessionId, visitor, &ctx);
+
+    stream->print(']');
+    stream->print('}');
+    request->send(stream);
+  });
+
+  server.on("/api/system/memory", HTTP_GET, [](AsyncWebServerRequest *request) {
+    StaticJsonDocument<128> doc;
+    doc["freeHeap"] = ESP.getFreeHeap();
+#if defined(ESP32)
+    doc["minFreeHeap"] = ESP.getMinFreeHeap();
+    doc["maxAllocHeap"] = ESP.getMaxAllocHeap();
+#endif
+    String res; serializeJson(doc, res);
+    request->send(200, "application/json", res);
   });
 
   server.on("/api/recover", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -664,48 +852,57 @@ void initHttpRoutes(AsyncWebServer &server) {
 
       Serial.printf("[API] PATCH /api/orders/%s - status=%s (互換モード)\n", orderNo.c_str(), newStatus.c_str());
 
-      bool found=false;
-      String notifyType = "order.updated";
-      
+      Order* updatedOrder = nullptr;
       for (auto& o : S().orders) {
         if (o.orderNo == orderNo) {
-          o.status = newStatus;
-          found = true;
-
-          if (newStatus == "DONE" || newStatus == "COOKED") {
-            o.cooked = true;
-            o.pickup_called = true;
-            notifyType = "order.cooked";
-            Serial.printf("  → 互換処理: pickup_called=true (呼び出し画面に追加)\n");
-          } else if (newStatus == "READY" || newStatus == "PICKED") {
-            o.picked_up = true;
-            o.pickup_called = false;
-            notifyType = "order.picked";
-            Serial.printf("  → 互換処理: pickup_called=false (呼び出し画面から削除)\n");
-          }
-          
+          updatedOrder = &o;
           break;
         }
       }
-      
-      if (!found) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
+
+      if (!updatedOrder) { request->send(404, "application/json", "{\"error\":\"Order not found\"}"); return; }
+
+      Order originalOrder = *updatedOrder;
+      String notifyType = "order.updated";
+
+      updatedOrder->status = newStatus;
+      if (newStatus == "DONE" || newStatus == "COOKED") {
+        updatedOrder->cooked = true;
+        updatedOrder->pickup_called = true;
+        notifyType = "order.cooked";
+        Serial.printf("  → 互換処理: pickup_called=true (呼び出し画面に追加)\n");
+      } else if (newStatus == "READY" || newStatus == "PICKED") {
+        updatedOrder->picked_up = true;
+        updatedOrder->pickup_called = false;
+        notifyType = "order.picked";
+        Serial.printf("  → 互換処理: pickup_called=false (呼び出し画面から削除)\n");
+      }
+
+      Order orderSnapshot = *updatedOrder;
 
       // WAL記録（JSON形式）
-      for (const auto& o : S().orders) {
-        if (o.orderNo == orderNo) {
-          JsonDocument walDoc;
-          walDoc["ts"] = (uint32_t)time(nullptr);
-          walDoc["action"] = "ORDER_UPDATE";
-          walDoc["orderNo"] = orderNo;
-          walDoc["status"] = newStatus;
-          walDoc["cooked"] = o.cooked;
-          walDoc["pickup_called"] = o.pickup_called;
-          walDoc["picked_up"] = o.picked_up;
-          walDoc["printed"] = o.printed;
-          String walLine; serializeJson(walDoc, walLine);
-          walAppend(walLine);
-          break;
+      StaticJsonDocument<512> walDoc;
+      walDoc["ts"] = (uint32_t)time(nullptr);
+      walDoc["action"] = "ORDER_UPDATE";
+      walDoc["orderNo"] = orderNo;
+      walDoc["status"] = newStatus;
+      walDoc["cooked"] = orderSnapshot.cooked;
+      walDoc["pickup_called"] = orderSnapshot.pickup_called;
+      walDoc["picked_up"] = orderSnapshot.picked_up;
+      walDoc["printed"] = orderSnapshot.printed;
+      String walLine; serializeJson(walDoc, walLine);
+      walAppend(walLine);
+
+      bool shouldArchive = orderSnapshot.picked_up;
+      if (shouldArchive) {
+        if (!archiveOrderAndRemove(orderNo, S().session.sessionId)) {
+          if (updatedOrder) {
+            *updatedOrder = originalOrder;
+          }
+          request->send(500, "application/json", "{\"error\":\"Failed to archive order\"}");
+          return;
         }
+        updatedOrder = nullptr;
       }
       
       snapshotSave();
@@ -750,7 +947,7 @@ void initHttpRoutes(AsyncWebServer &server) {
     }
     
     // WAL記録（JSON形式）
-    JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
     walDoc["ts"] = (uint32_t)time(nullptr);
     walDoc["action"] = "ORDER_COOKED";
     walDoc["orderNo"] = orderNo;
@@ -778,29 +975,37 @@ void initHttpRoutes(AsyncWebServer &server) {
     
     Serial.printf("[API] 抽出された注文番号: %s\n", orderNo.c_str());
     
-    bool found = false;
+    Order* targetOrder = nullptr;
     for (auto& o : S().orders) {
       if (o.orderNo == orderNo) {
-        o.picked_up = true;
-        o.pickup_called = false;
-        found = true;
-        Serial.printf("  ✅ 注文 %s を品出し済みにマークしました\n", orderNo.c_str());
+        targetOrder = &o;
         break;
       }
     }
-    if (!found) { 
+    if (!targetOrder) { 
       Serial.printf("  ❌ エラー: 注文 %s が見つかりません\n", orderNo.c_str());
       request->send(404, "application/json", "{\"error\":\"Order not found\"}"); 
       return; 
     }
+
+    Order originalOrder = *targetOrder;
+    targetOrder->picked_up = true;
+    targetOrder->pickup_called = false;
+    Serial.printf("  ✅ 注文 %s を品出し済みにマークしました\n", orderNo.c_str());
     
     // WAL記録（JSON形式）
-    JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
     walDoc["ts"] = (uint32_t)time(nullptr);
     walDoc["action"] = "ORDER_PICKED";
     walDoc["orderNo"] = orderNo;
     String walLine; serializeJson(walDoc, walLine);
     walAppend(walLine);
+
+      if (!archiveOrderAndRemove(orderNo, S().session.sessionId)) {
+        *targetOrder = originalOrder;
+      request->send(500, "application/json", "{\"error\":\"Failed to archive order\"}");
+      return;
+    }
     
     snapshotSave();
     
@@ -894,7 +1099,7 @@ void initHttpRoutes(AsyncWebServer &server) {
     snapshotSave();
     
     // WAL記録（JSON形式）
-    JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
     walDoc["ts"] = (uint32_t)time(nullptr);
     walDoc["action"] = "SESSION_END";
     String walLine; serializeJson(walDoc, walLine);
@@ -919,7 +1124,7 @@ void initHttpRoutes(AsyncWebServer &server) {
     if (snapshotSave()) Serial.println("スナップショット保存完了"); else Serial.println("警告: スナップショット保存失敗");
 
     // WAL記録（JSON形式）
-    JsonDocument walDoc;
+  StaticJsonDocument<512> walDoc;
     walDoc["ts"] = (uint32_t)time(nullptr);
     walDoc["action"] = "SYSTEM_RESET";
     String walLine; serializeJson(walDoc, walLine);

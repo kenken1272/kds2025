@@ -85,6 +85,8 @@ struct State {
 
 State& S();
 
+using ArchiveOrderVisitor = bool (*)(const Order&, const String&, uint32_t archivedAt, void* context);
+
 String allocateOrderNo();
 String generateSkuMain();
 String generateSkuSide();
@@ -93,11 +95,19 @@ Order* findOrderByNo(const String& orderNo);
 int computeOrderTotal(const Order& order);
 void orderToJson(JsonObject json, const Order& order);
 bool orderFromJson(JsonVariantConst json, Order& order);
+size_t estimateOrderDocumentCapacity(const Order& order);
+
+bool archiveAppend(const Order& order, const String& sessionId, uint32_t archivedAt);
+bool archiveOrderAndRemove(const String& orderNo, const String& sessionId, uint32_t archivedAt = 0, bool logWal = true);
+bool archiveForEach(const String& sessionIdFilter, ArchiveOrderVisitor visitor, void* context);
+bool archiveFindOrder(const String& sessionIdFilter, const String& orderNo, Order& outOrder, uint32_t* archivedAt = nullptr);
+bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t archivedAt);
 
 bool snapshotSave();
 bool snapshotLoad();
 bool walAppend(const String& line);
 bool recoverToLatest(String &outLastTs);
+bool getLatestSnapshotJson(String& outJson, String& outPath);
 
 void ensureInitialMenu();
 void forceCreateInitialMenu();
