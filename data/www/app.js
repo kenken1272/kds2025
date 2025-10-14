@@ -464,7 +464,7 @@ function renderOrderPage() {
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                 <h2>新規注文</h2>
                 <button class="btn btn-info" onclick="toggleCompletedOrders()" id="toggle-completed-btn">
-                    📋 注文済み一覧表示
+                    📋 キャンセル・再印刷
                 </button>
             </div>
             
@@ -1861,21 +1861,13 @@ async function cancelOrder(orderNo) {
     const reason = prompt('キャンセル理由を入力してください（任意）:') || '';
     
     try {
-        // URLSearchParamsを使用（正しいエンコーディング）
-        const params = new URLSearchParams();
-        params.set('orderNo', orderNo);
-        if (reason) {
-            params.set('reason', reason);
-        }
-        
-        console.log('[cancelOrder] 送信データ:', params.toString());
+        const payload = { orderNo, reason };
+        console.log('[cancelOrder] 送信データ(JSON):', payload);
         
         const response = await fetch('/api/orders/cancel', {
             method: 'POST',
-            headers: { 
-                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
-            },
-            body: params.toString()
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
         });
         
         console.log('[cancelOrder] レスポンス:', response.status, response.statusText);

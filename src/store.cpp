@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <utility>
+#include <cstring>
+#include <cstdio>
 
 static State g_state;
 
@@ -108,36 +110,77 @@ String allocateOrderNo() {
     return "9999";
 }
 
-String generateSkuMain() {
-    prefs.begin("kds", false);
-    uint16_t seq = prefs.getUShort("mainSeq", 1);
-    
-    String sku = "main_" + String(seq);
-    while (sku.length() < 9) {
-        sku = sku.substring(0, 5) + "0" + sku.substring(5);
+static uint16_t findMaxSeq(const char* prefix, const char* category) {
+    uint16_t maxSeq = 0;
+    const size_t prefixLen = strlen(prefix);
+    for (const auto& item : S().menu) {
+        if (item.category == category && item.sku.startsWith(prefix)) {
+            uint16_t value = item.sku.substring(prefixLen).toInt();
+            if (value > maxSeq) {
+                maxSeq = value;
+            }
+        }
     }
-    
-    seq++;
-    prefs.putUShort("mainSeq", seq);
+    return maxSeq;
+}
+
+static String formatSku(const char* prefix, uint16_t seq) {
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "%s%04u", prefix, seq);
+    return String(buffer);
+}
+
+static String nextSku(const char* prefix, const char* category, const char* counterKey) {
+    prefs.begin("kds", false);
+    uint16_t storedSeq = prefs.getUShort(counterKey, 1);
+
+    // Keep the counter ahead of anything already stored so we do not overwrite existing entries.
+    uint16_t maxExisting = findMaxSeq(prefix, category);
+    if (storedSeq <= maxExisting) {
+        storedSeq = maxExisting + 1;
+    }
+
+    uint16_t seq = storedSeq == 0 ? 1 : storedSeq;
+    String candidate;
+    bool resolved = false;
+    for (int attempts = 0; attempts < 10000; ++attempts) {
+        if (seq > 9999) {
+            seq = 1;
+        }
+        candidate = formatSku(prefix, seq);
+        bool exists = false;
+        for (const auto& item : S().menu) {
+            if (item.sku == candidate) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            resolved = true;
+            break;
+        }
+        seq++;
+    }
+
+    uint16_t nextSeq = seq + 1;
+    if (nextSeq > 9999) {
+        nextSeq = 1;
+    }
+    prefs.putUShort(counterKey, nextSeq);
     prefs.end();
-    
-    return sku;
+
+    if (!resolved) {
+        return formatSku(prefix, 9999);
+    }
+    return candidate;
+}
+
+String generateSkuMain() {
+    return nextSku("main_", "MAIN", "mainSeq");
 }
 
 String generateSkuSide() {
-    prefs.begin("kds", false);
-    uint16_t seq = prefs.getUShort("sideSeq", 1);
-    
-    String sku = "side_" + String(seq);
-    while (sku.length() < 9) {
-        sku = sku.substring(0, 5) + "0" + sku.substring(5);
-    }
-    
-    seq++;
-    prefs.putUShort("sideSeq", seq);
-    prefs.end();
-    
-    return sku;
+    return nextSku("side_", "SIDE", "sideSeq");
 }
 
 Order* findOrderByNo(const String& orderNo) {
