@@ -11,6 +11,7 @@
 #include <cstdio>
 
 static State g_state;
+static SalesSummary g_salesSummary;
 
 State& S() {
     return g_state;
@@ -19,6 +20,209 @@ State& S() {
 static Preferences prefs;
 static const char* kDataDir = "/kds";
 static const char* kArchivePath = "/kds/orders_archive.jsonl";
+static const char* kSalesSummaryPath = "/kds/sales_summary.json";
+
+static bool ensureDataDir();
+
+const SalesSummary& getSalesSummary() {
+    return g_salesSummary;
+}
+
+static void resetSalesSummary() {
+    g_salesSummary = SalesSummary{};
+}
+
+static void accumulateOrderForSummary(SalesSummary& summary, const Order& order) {
+    int64_t total = static_cast<int64_t>(computeOrderTotal(order));
+    if (total < 0) {
+        total = 0;
+    }
+
+    if (order.status == "CANCELLED") {
+        summary.cancelledOrders += 1;
+        summary.cancelledAmount += total;
+    } else {
+        summary.confirmedOrders += 1;
+        summary.revenue += total;
+    }
+}
+
+bool saveSalesSummary() {
+    if (!ensureDataDir()) {
+        return false;
+    }
+
+    DynamicJsonDocument doc(256);
+    doc["confirmedOrders"] = g_salesSummary.confirmedOrders;
+    doc["cancelledOrders"] = g_salesSummary.cancelledOrders;
+    doc["revenue"] = g_salesSummary.revenue;
+    doc["cancelledAmount"] = g_salesSummary.cancelledAmount;
+    doc["lastUpdated"] = g_salesSummary.lastUpdated;
+
+    File file = LittleFS.open(kSalesSummaryPath, "w");
+    if (!file) {
+        Serial.printf("[SALES] サマリ保存失敗: %s\n", kSalesSummaryPath);
+        return false;
+    }
+
+    size_t written = serializeJson(doc, file);
+    file.println();
+    file.flush();
+    file.close();
+
+    Serial.printf("[SALES] サマリ保存: orders=%lu, cancelled=%lu, revenue=%lld, cancelledAmount=%lld\n",
+                  static_cast<unsigned long>(g_salesSummary.confirmedOrders),
+                  static_cast<unsigned long>(g_salesSummary.cancelledOrders),
+                  static_cast<long long>(g_salesSummary.revenue),
+                  static_cast<long long>(g_salesSummary.cancelledAmount));
+
+    return written > 0;
+}
+
+bool recalculateSalesSummary() {
+    SalesSummary summary;
+
+    Serial.println("[SALES][DEBUG] ===== 売上サマリ再計算開始 (フロント更新トリガー) =====");
+
+    size_t activeBytes = 0;
+    uint32_t activeCount = 0;
+    for (const auto& order : S().orders) {
+        accumulateOrderForSummary(summary, order);
+
+        DynamicJsonDocument doc(estimateOrderDocumentCapacity(order));
+        JsonObject obj = doc.to<JsonObject>();
+        orderToJson(obj, order);
+
+        String json;
+        serializeJson(doc, json);
+        activeBytes += json.length();
+        ++activeCount;
+        Serial.printf("[SALES][DEBUG] RAM注文[%u]: %s\n", activeCount, json.c_str());
+    }
+    Serial.printf("[SALES][DEBUG] RAM注文合計: %lu件, %lu bytes\n",
+                  static_cast<unsigned long>(activeCount),
+                  static_cast<unsigned long>(activeBytes));
+
+    size_t archiveBytes = 0;
+    uint32_t archiveLines = 0;
+    if (LittleFS.exists(kArchivePath)) {
+        File archiveFile = LittleFS.open(kArchivePath, "r");
+        if (archiveFile) {
+            while (archiveFile.available()) {
+                String line = archiveFile.readStringUntil('\n');
+                line.trim();
+                if (line.isEmpty()) {
+                    continue;
+                }
+                ++archiveLines;
+                archiveBytes += line.length();
+                Serial.printf("[SALES][DEBUG] ARCHIVE行[%u]: %s\n", archiveLines, line.c_str());
+            }
+            archiveFile.close();
+            Serial.printf("[SALES][DEBUG] ARCHIVE合計: %lu行, %lu bytes\n",
+                          static_cast<unsigned long>(archiveLines),
+                          static_cast<unsigned long>(archiveBytes));
+        } else {
+            Serial.println("[SALES][DEBUG] ARCHIVEファイルオープン失敗: /kds/orders_archive.jsonl");
+        }
+    } else {
+        Serial.println("[SALES][DEBUG] ARCHIVEファイル不存在: /kds/orders_archive.jsonl");
+    }
+
+    const String sessionId = S().session.sessionId;
+    auto visitor = [](const Order& order, const String& storedSession, uint32_t, void* ctx) -> bool {
+        auto* summaryPtr = static_cast<SalesSummary*>(ctx);
+        if (!summaryPtr) {
+            return false;
+        }
+        accumulateOrderForSummary(*summaryPtr, order);
+        return true;
+    };
+
+    archiveForEach(sessionId, visitor, &summary);
+
+    summary.lastUpdated = static_cast<uint32_t>(time(nullptr));
+    g_salesSummary = summary;
+
+    Serial.println("[SALES] サマリ再計算完了");
+    return saveSalesSummary();
+}
+
+bool loadSalesSummary() {
+    if (!LittleFS.exists(kSalesSummaryPath)) {
+        Serial.println("[SALES] サマリファイルが見つかりません。再計算します");
+        return recalculateSalesSummary();
+    }
+
+    File file = LittleFS.open(kSalesSummaryPath, "r");
+    if (!file) {
+        Serial.println("[SALES] サマリファイル読み込み失敗。再計算します");
+        return recalculateSalesSummary();
+    }
+
+    DynamicJsonDocument doc(256);
+    DeserializationError err = deserializeJson(doc, file);
+    file.close();
+    if (err) {
+        Serial.printf("[SALES] サマリJSON解析失敗 (%s)。再計算します\n", err.c_str());
+        return recalculateSalesSummary();
+    }
+
+    g_salesSummary.confirmedOrders = doc["confirmedOrders"] | static_cast<uint32_t>(0);
+    g_salesSummary.cancelledOrders = doc["cancelledOrders"] | static_cast<uint32_t>(0);
+    g_salesSummary.revenue = doc["revenue"] | static_cast<int64_t>(0);
+    g_salesSummary.cancelledAmount = doc["cancelledAmount"] | static_cast<int64_t>(0);
+    g_salesSummary.lastUpdated = doc["lastUpdated"] | static_cast<uint32_t>(0);
+
+    Serial.printf("[SALES] サマリ読込: orders=%lu, cancelled=%lu, revenue=%lld, cancelledAmount=%lld\n",
+                  static_cast<unsigned long>(g_salesSummary.confirmedOrders),
+                  static_cast<unsigned long>(g_salesSummary.cancelledOrders),
+                  static_cast<long long>(g_salesSummary.revenue),
+                  static_cast<long long>(g_salesSummary.cancelledAmount));
+
+    return true;
+}
+
+void applyOrderToSalesSummary(const Order& order) {
+    if (order.status == "CANCELLED") {
+        applyCancellationToSalesSummary(order);
+        return;
+    }
+
+    int64_t total = static_cast<int64_t>(computeOrderTotal(order));
+    if (total < 0) {
+        total = 0;
+    }
+
+    g_salesSummary.confirmedOrders += 1;
+    g_salesSummary.revenue += total;
+    g_salesSummary.lastUpdated = static_cast<uint32_t>(time(nullptr));
+
+    saveSalesSummary();
+}
+
+void applyCancellationToSalesSummary(const Order& order) {
+    int64_t total = static_cast<int64_t>(computeOrderTotal(order));
+    if (total < 0) {
+        total = 0;
+    }
+
+    if (g_salesSummary.confirmedOrders > 0) {
+        g_salesSummary.confirmedOrders -= 1;
+    }
+    g_salesSummary.cancelledOrders += 1;
+    g_salesSummary.revenue -= total;
+    if (g_salesSummary.revenue < 0) {
+        g_salesSummary.revenue = 0;
+    }
+    g_salesSummary.cancelledAmount += total;
+    if (g_salesSummary.cancelledAmount < 0) {
+        g_salesSummary.cancelledAmount = 0;
+    }
+    g_salesSummary.lastUpdated = static_cast<uint32_t>(time(nullptr));
+
+    saveSalesSummary();
+}
 
 static bool ensureDataDir() {
     if (LittleFS.exists(kDataDir)) {
@@ -1285,6 +1489,10 @@ bool recoverToLatest(String &outLastTs) {
     
     Serial.printf("[RECOVER] wal apply: %d entries (lastTs=%s)\n", entriesApplied, outLastTs.c_str());
     Serial.printf("[RECOVER] 復元完了: 注文数=%d, メニュー数=%d\n", S().orders.size(), S().menu.size());
+
+    if (!recalculateSalesSummary()) {
+        Serial.println("[RECOVER] 警告: 売上サマリの再計算に失敗しました");
+    }
     
     return true;
 }
@@ -1318,7 +1526,7 @@ void createInitialMenuItems() {
         strftime(buffer, sizeof(buffer), "%Y-%m-%d-%p", &timeinfo);
         S().session.sessionId = String(buffer);
     } else {
-        S().session.sessionId = "2025-09-25-AM";
+        S().session.sessionId = "sales-data";
     }
     S().session.startedAt = time(nullptr);
     

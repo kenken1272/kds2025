@@ -112,6 +112,10 @@ void setup() {
         Serial.println("スナップショット読込に失敗、初期メニューで開始");
     }
     ensureInitialMenu();
+
+    if (!loadSalesSummary()) {
+        Serial.println("[SALES] サマリ初期化に失敗しました");
+    }
     
     IPAddress apIP = WiFi.softAPIP();
     Serial.println("=== KDS ESP32 起動完了 ===");

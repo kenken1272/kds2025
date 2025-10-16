@@ -2,6 +2,7 @@
 #include <vector>
 #include <WString.h>
 #include <ArduinoJson.h>
+#include <stdint.h>
 
 struct Session {
     String sessionId;
@@ -83,7 +84,22 @@ struct State {
     std::vector<Order> orders;
 };
 
+struct SalesSummary {
+    uint32_t confirmedOrders{0};
+    uint32_t cancelledOrders{0};
+    int64_t revenue{0};
+    int64_t cancelledAmount{0};
+    uint32_t lastUpdated{0};
+};
+
 State& S();
+
+const SalesSummary& getSalesSummary();
+bool loadSalesSummary();
+bool saveSalesSummary();
+bool recalculateSalesSummary();
+void applyOrderToSalesSummary(const Order& order);
+void applyCancellationToSalesSummary(const Order& order);
 
 using ArchiveOrderVisitor = bool (*)(const Order&, const String&, uint32_t archivedAt, void* context);
 

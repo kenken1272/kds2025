@@ -244,6 +244,8 @@ static void processCancelRequest(AsyncWebServerRequest *request, const uint8_t *
   activeOrder->status = "CANCELLED";
   activeOrder->cancelReason = reason;
 
+  applyCancellationToSalesSummary(*activeOrder);
+
   bool requireSnapshot = !fromArchive;
 
   if (fromArchive) {
@@ -624,7 +626,8 @@ void initHttpRoutes(AsyncWebServer &server) {
           i+1, it.name.c_str(), it.qty, it.unitPriceApplied, it.kind.c_str());
       }
 
-    S().orders.push_back(order);
+  S().orders.push_back(order);
+  applyOrderToSalesSummary(order);
       
     DynamicJsonDocument walDoc(4096);
       walDoc["ts"] = (uint32_t)time(nullptr);
@@ -761,6 +764,32 @@ void initHttpRoutes(AsyncWebServer &server) {
       processCancelRequest(request, data, len);
     });
 
+  server.on("/api/sales/summary", HTTP_GET, [](AsyncWebServerRequest *request) {
+    bool rebuild = request->hasParam("rebuild");
+    if (rebuild) {
+      if (!recalculateSalesSummary()) {
+        request->send(500, "application/json", "{\"error\":\"Failed to rebuild sales summary\"}");
+        return;
+      }
+    }
+
+    const SalesSummary& summary = getSalesSummary();
+    DynamicJsonDocument doc(256);
+    doc["sessionId"] = S().session.sessionId;
+    doc["updatedAt"] = summary.lastUpdated;
+    doc["confirmedOrders"] = summary.confirmedOrders;
+    doc["cancelledOrders"] = summary.cancelledOrders;
+    doc["totalOrders"] = summary.confirmedOrders + summary.cancelledOrders;
+    doc["netSales"] = summary.revenue;
+    doc["cancelledAmount"] = summary.cancelledAmount;
+    doc["grossSales"] = summary.revenue + summary.cancelledAmount;
+    doc["currency"] = "JPY";
+
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
   server.on("/api/printer/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     JsonDocument doc;
     doc["paperOut"]   = S().printer.paperOut;
@@ -785,6 +814,29 @@ void initHttpRoutes(AsyncWebServer &server) {
 
   server.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     sendCsvStream(request);
+  });
+
+  server.on("/api/export/sales-summary-lite", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const SalesSummary& summary = getSalesSummary();
+
+    DynamicJsonDocument doc(320);
+    doc["sessionId"] = S().session.sessionId;
+    doc["generatedAt"] = static_cast<uint32_t>(time(nullptr));
+    doc["lastUpdated"] = summary.lastUpdated;
+    doc["confirmedOrders"] = summary.confirmedOrders;
+    doc["cancelledOrders"] = summary.cancelledOrders;
+    doc["totalOrders"] = summary.confirmedOrders + summary.cancelledOrders;
+    doc["netSales"] = summary.revenue;
+    doc["cancelledAmount"] = summary.cancelledAmount;
+    doc["grossSales"] = summary.revenue + summary.cancelledAmount;
+    doc["currency"] = "JPY";
+
+    String out;
+    serializeJson(doc, out);
+
+    AsyncWebServerResponse* response = request->beginResponse(200, "application/json", out);
+    response->addHeader("Content-Disposition", "attachment; filename=\"sales-summary-lite.json\"");
+    request->send(response);
   });
 
   server.on("/api/export/snapshot", HTTP_GET, [](AsyncWebServerRequest *request) {

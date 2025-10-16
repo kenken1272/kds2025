@@ -2,9 +2,9 @@ const state = {
     page: 'order',
     ws: null,
     online: false,
-    data: null, 
+    data: null,
     cart: [],
-    settingsTab: 'main', 
+    settingsTab: 'main',
     callList: [],
     memory: null,
     archived: {
@@ -13,52 +13,35 @@ const state = {
         loading: false,
         error: null,
         fetched: false
+    },
+    salesSummary: {
+        data: null,
+        sessionId: null,
+        fetchedAt: null,
+        loading: false,
+        error: null
     }
 };
-
-function calculateOrderTotal(order) {
-    if (!order || !Array.isArray(order.items)) {
-        return 0;
-    }
-    return order.items.reduce((sum, item) => {
-        const unitPrice = item.unitPriceApplied || item.unitPrice || 0;
-        const qty = item.qty || 1;
-        const discount = item.discountValue || 0;
-        return sum + (unitPrice * qty) - discount;
-    }, 0);
-}
-
-function formatArchivedTimestamp(ts) {
-    if (!ts || ts < 946684800) {
-        return '時刻不明';
-    }
-    const date = new Date(ts * 1000);
-    return date.toLocaleString('ja-JP', {
-        timeZone: 'Asia/Tokyo',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-}
 
 function getOrderFromState(orderNo) {
     if (!orderNo) {
         return null;
     }
+
     if (state.data && Array.isArray(state.data.orders)) {
-        const active = state.data.orders.find(order => order.orderNo === orderNo);
-            if (active && active.orderNo) {
-            return { order: active, source: 'active' };
+        const activeOrder = state.data.orders.find(order => order && order.orderNo === orderNo);
+        if (activeOrder) {
+            return { order: activeOrder, source: 'active' };
         }
     }
+
     if (state.archived && Array.isArray(state.archived.orders)) {
-        const archived = state.archived.orders.find(order => order.orderNo === orderNo);
-        if (archived) {
-            return { order: archived, source: 'archived' };
+        const archivedOrder = state.archived.orders.find(order => order && order.orderNo === orderNo);
+        if (archivedOrder) {
+            return { order: archivedOrder, source: 'archived' };
         }
     }
+
     return null;
 }
 
@@ -70,24 +53,24 @@ const reconnectBtn = document.getElementById('reconnect-btn');
 const statusIndicator = document.getElementById('connection-status');
 
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('KDS PWA 初期化中...');
+    console.log('KDS PWA init');
 
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js')
-            .then(reg => console.log('Service Worker 登録成功:', reg))
-            .catch(err => console.error('Service Worker 登録失敗:', err));
+            .then(reg => console.log('Service Worker registered', reg))
+            .catch(err => console.error('Service Worker registration failed', err));
     }
 
     setupNavigation();
 
     syncTimeOnce().then(() => {
         console.log('初期時刻同期完了 - データ取得開始');
-        // 初期データ取得
         loadStateData();
+        fetchSalesSummary(true);
     }).catch(err => {
         console.error('初期時刻同期失敗:', err);
-        // 失敗してもデータは取得
         loadStateData();
+        fetchSalesSummary(true);
     });
 
     setInterval(syncTimeOnce, 5 * 60 * 1000);
@@ -96,18 +79,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     reconnectBtn.addEventListener('click', connectWs);
 
-    window.addEventListener("error", e => console.error("GLOBAL ERR", e.error || e.message));
-    window.addEventListener("unhandledrejection", e => console.error("PROMISE REJECTION", e.reason));
+    window.addEventListener('error', e => console.error('GLOBAL ERR', e.error || e.message));
+    window.addEventListener('unhandledrejection', e => console.error('PROMISE REJECTION', e.reason));
 
-    document.addEventListener("click", (ev) => {
+    document.addEventListener('click', ev => {
         const btn = ev.target.closest("[data-action='confirm-order']");
-        if (!btn) return;
-        
+        if (!btn) {
+            return;
+        }
+
         ev.preventDefault();
 
-        if (btn.dataset.loading === "1") return;
-        btn.dataset.loading = "1";
-        
+        if (btn.dataset.loading === '1') {
+            return;
+        }
+        btn.dataset.loading = '1';
+
         submitOrder().catch(console.error).finally(() => {
             delete btn.dataset.loading;
         });
@@ -154,8 +141,12 @@ async function loadStateData() {
         const response = await fetch('/api/state');
         state.data = await response.json();
         console.log('状態データ取得完了:', state.data);
-    const forceArchiveReload = state.settingsTab === 'sales';
-    await loadArchivedOrders(state.data.session.sessionId, forceArchiveReload);
+        const forceSalesReload = state.settingsTab === 'sales';
+        const sessionId = state.data && state.data.session ? state.data.session.sessionId : null;
+        if (sessionId) {
+            await loadArchivedOrders(sessionId, forceSalesReload);
+        }
+        ensureSalesSummary(forceSalesReload);
         render(); 
         updateConfirmOrderButton();
     } catch (error) {
@@ -234,6 +225,72 @@ function ensureArchivedOrders(force = false) {
         return;
     }
     loadArchivedOrders(sessionId, force);
+}
+
+function ensureSalesSummary(force = false) {
+    if (!state.data || !state.data.session) {
+        return;
+    }
+
+    const sessionId = state.data.session.sessionId;
+    if (!sessionId) {
+        return;
+    }
+
+    if (state.salesSummary.loading) {
+        return;
+    }
+
+    const hasCurrentSummary = state.salesSummary.data && state.salesSummary.sessionId === sessionId;
+    if (!force && hasCurrentSummary) {
+        return;
+    }
+
+    fetchSalesSummary(force);
+}
+
+async function fetchSalesSummary(force = false) {
+    if (state.salesSummary.loading) {
+        return;
+    }
+
+    state.salesSummary.loading = true;
+    state.salesSummary.error = null;
+
+    if (state.settingsTab === 'sales') {
+        render();
+    }
+
+    try {
+        const params = [];
+        if (force) {
+            params.push('rebuild=1');
+        }
+        params.push(`ts=${Date.now()}`);
+        const url = `/api/sales/summary?${params.join('&')}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        state.salesSummary.data = data;
+        if (data && data.sessionId) {
+            state.salesSummary.sessionId = data.sessionId;
+        } else if (state.data && state.data.session) {
+            state.salesSummary.sessionId = state.data.session.sessionId;
+        } else {
+            state.salesSummary.sessionId = null;
+        }
+        state.salesSummary.fetchedAt = Date.now();
+    } catch (error) {
+        console.error('売上サマリ取得エラー:', error);
+        state.salesSummary.error = error && error.message ? error.message : 'unknown';
+    } finally {
+        state.salesSummary.loading = false;
+        if (state.settingsTab === 'sales') {
+            render();
+        }
+    }
 }
 async function syncTimeOnce() {
     const now = new Date();
@@ -789,75 +846,93 @@ function renderSettingsPage() {
     } else if (state.settingsTab === 'system') {
         tabContent = `
             <div class="card">
-                <h3>システム設定</h3>
-                <div style="margin: 20px 0;">
-                    <h4>前売り機能</h4>
-                    <label style="display: block; margin: 10px 0;">
-                        <input type="checkbox" ${state.data.settings.presaleEnabled ? 'checked' : ''} id="presale-enabled"> 
-                        前売り機能を有効にする
-                    </label>
-                    <small style="color: #666;">無効にすると注文画面で前売りボタンが非表示になります</small>
+                <div class="settings-header">
+                    <div>
+                        <h3>システム設定</h3>
+                        <p class="settings-subtitle">KDSの基本設定を管理します</p>
+                    </div>
+                    <div class="settings-actions">
+                        <button class="btn btn-primary" onclick="saveSystemSettings()">💾 システム設定を保存</button>
+                    </div>
                 </div>
-                
-                <div style="margin: 20px 0;">
-                    <h4>店舗情報</h4>
-                    <label style="display: block; margin: 10px 0;">
-                        店舗名:
-                        <input type="text" value="${state.data.settings.store.name}" id="store-name" style="width: 200px;">
-                    </label>
-                    <label style="display: block; margin: 10px 0;">
-                        店舗名（レシート印刷用ローマ字）:
-                        <input type="text" value="${state.data.settings.store.nameRomaji || 'KDS BURGER'}" id="store-name-romaji" style="width: 200px;">
-                    </label>
-                    <small style="color: #666; display: block; margin-bottom: 10px;">レシート印刷時に使用される英語表記です</small>
-                    <label style="display: block; margin: 10px 0;">
-                        レジスターID:
-                        <input type="text" value="${state.data.settings.store.registerId}" id="register-id" style="width: 200px;">
-                    </label>
-                </div>
-                
-                <div style="margin: 20px 0;">
-                    <h4>注文番号設定</h4>
-                    <label style="display: block; margin: 10px 0;">
-                        最小番号:
-                        <input type="number" value="${state.data.settings.numbering.min}" id="numbering-min" min="1" max="9999" style="width: 100px;">
-                    </label>
-                    <label style="display: block; margin: 10px 0;">
-                        最大番号:
-                        <input type="number" value="${state.data.settings.numbering.max}" id="numbering-max" min="1" max="9999" style="width: 100px;">
-                    </label>
-                </div>
-                
-                <button class="btn btn-primary" onclick="saveSystemSettings()">システム設定を保存</button>
-                
-                <div style="margin: 30px 0; padding: 20px; border: 2px solid #dc3545; border-radius: 5px; background: #fff5f5;">
-                    <h4 style="color: #dc3545;">⚠️初期化</h4>
-                    <p>システムを完全に初期化します。全ての注文データ、注文番号カウンタ、設定が削除されます</p>
-                    <button class="btn" style="background: #dc3545; color: white;" onclick="resetSystem()">🔄 システム完全初期化</button>
+
+                <div class="settings-panel">
+                    <section class="settings-section">
+                        <h4>前売り機能</h4>
+                        <p class="settings-note">無効にすると注文画面で前売りボタンが非表示になります</p>
+                        <label class="settings-toggle">
+                            <input type="checkbox" ${state.data.settings.presaleEnabled ? 'checked' : ''} id="presale-enabled">
+                            <span>前売り機能を有効にする</span>
+                        </label>
+                    </section>
+
+                    <section class="settings-section">
+                        <h4>店舗情報</h4>
+                        <div class="settings-field">
+                            <label for="store-name">店舗名</label>
+                            <input type="text" value="${state.data.settings.store.name}" id="store-name">
+                        </div>
+                        <div class="settings-field">
+                            <label for="store-name-romaji">店舗名（レシート印刷用ローマ字）</label>
+                            <input type="text" value="${state.data.settings.store.nameRomaji || 'KDS BURGER'}" id="store-name-romaji">
+                            <small>レシート印刷時に使用される英語表記です</small>
+                        </div>
+                        <div class="settings-field">
+                            <label for="register-id">レジスターID</label>
+                            <input type="text" value="${state.data.settings.store.registerId}" id="register-id">
+                        </div>
+                    </section>
+
+                    <section class="settings-section">
+                        <h4>注文番号設定</h4>
+                        <div class="settings-inline">
+                            <div class="settings-field">
+                                <label for="numbering-min">最小番号</label>
+                                <input type="number" value="${state.data.settings.numbering.min}" id="numbering-min" min="1" max="9999">
+                            </div>
+                            <div class="settings-field">
+                                <label for="numbering-max">最大番号</label>
+                                <input type="number" value="${state.data.settings.numbering.max}" id="numbering-max" min="1" max="9999">
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="settings-section settings-danger">
+                        <h4>⚠️ 初期化</h4>
+                        <p class="settings-note">システムを完全に初期化します。全ての注文データ、注文番号カウンタ、設定が削除されます。</p>
+                        <button class="btn btn-danger" onclick="resetSystem()">🔄 システム完全初期化</button>
+                    </section>
                 </div>
             </div>
         `;
     } else if (state.settingsTab === 'sales') {
-        if (state.archived.loading) {
+        if (state.salesSummary.loading) {
             tabContent = `
                 <div class="card">
                     <h3>売上確認</h3>
-                    <p>アーカイブ注文を読込中...</p>
+                    <p>売上サマリを読込中...</p>
                 </div>
             `;
-        } else if (state.archived.error) {
+        } else if (state.salesSummary.error) {
             tabContent = `
                 <div class="card">
                     <h3>売上確認</h3>
-                    <p style="color:#d32f2f;">アーカイブ読込に失敗しました: ${state.archived.error}</p>
-                    <button class="btn btn-primary" onclick="ensureArchivedOrders(true)">再試行</button>
+                    <p style="color:#d32f2f;">売上サマリの取得に失敗しました: ${state.salesSummary.error}</p>
+                    <button class="btn btn-primary" onclick="fetchSalesSummary(true)">再試行</button>
                 </div>
             `;
-        } else {
-            const salesStats = calculateSalesStats();
-            const archivedOrders = [...state.archived.orders]
-                .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0))
-                .slice(0, 20);
+        } else if (state.salesSummary.data) {
+            const summary = state.salesSummary.data;
+            const updatedAt = summary.updatedAt ? new Date(summary.updatedAt * 1000).toLocaleString('ja-JP') : '不明';
+            const confirmed = summary.confirmedOrders || 0;
+            const cancelled = summary.cancelledOrders || 0;
+            const totalOrders = summary.totalOrders != null ? summary.totalOrders : confirmed + cancelled;
+            const netSales = summary.netSales || 0;
+            const grossSales = summary.grossSales != null ? summary.grossSales : netSales + (summary.cancelledAmount || 0);
+            const cancelledAmount = summary.cancelledAmount || 0;
+            const averageOrder = confirmed > 0 ? Math.round(netSales / confirmed) : 0;
+            const cancelRate = totalOrders > 0 ? ((cancelled / totalOrders) * 100).toFixed(1) : '0.0';
+            const adjustment = grossSales - netSales;
 
             tabContent = `
                 <div class="card">
@@ -868,209 +943,156 @@ function renderSettingsPage() {
                         </button>
                     </div>
 
-                    <!-- 全体統計 -->
                     <div class="sales-overview" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0;">
                         <div class="stat-card" style="background: #e3f2fd; padding: 15px; border-radius: 8px; text-align: center;">
                             <h4 style="margin: 0 0 10px 0; color: #1976d2;">総注文数</h4>
-                            <div style="font-size: 2em; font-weight: bold; color: #1976d2;">${salesStats.totalOrders}</div>
-                            <small style="color: #666;">件</small>
+                            <div style="font-size: 2em; font-weight: bold; color: #1976d2;">${totalOrders.toLocaleString()}</div>
+                            <small style="color: #666;">件 (確定 ${confirmed.toLocaleString()} / キャンセル ${cancelled.toLocaleString()})</small>
                         </div>
                         <div class="stat-card" style="background: #e8f5e8; padding: 15px; border-radius: 8px; text-align: center;">
                             <h4 style="margin: 0 0 10px 0; color: #388e3c;">総売上</h4>
-                            <div style="font-size: 2em; font-weight: bold; color: #388e3c;">¥${salesStats.totalRevenue.toLocaleString()}</div>
-                            <small style="color: #666;">円</small>
+                            <div style="font-size: 2em; font-weight: bold; color: #388e3c;">¥${netSales.toLocaleString()}</div>
+                            <small style="color: #666;">円 (純売上)</small>
                         </div>
                         <div class="stat-card" style="background: #fff3e0; padding: 15px; border-radius: 8px; text-align: center;">
                             <h4 style="margin: 0 0 10px 0; color: #f57c00;">平均単価</h4>
-                            <div style="font-size: 2em; font-weight: bold; color: #f57c00;">¥${salesStats.averageOrder.toLocaleString()}</div>
-                            <small style="color: #666;">円</small>
+                            <div style="font-size: 2em; font-weight: bold; color: #f57c00;">¥${averageOrder.toLocaleString()}</div>
+                            <small style="color: #666;">円 / 注文</small>
                         </div>
                         <div class="stat-card" style="background: #fce4ec; padding: 15px; border-radius: 8px; text-align: center;">
-                            <h4 style="margin: 0 0 10px 0; color: #c2185b;">総商品数</h4>
-                            <div style="font-size: 2em; font-weight: bold; color: #c2185b;">${salesStats.totalItems}</div>
-                            <small style="color: #666;">個</small>
+                            <h4 style="margin: 0 0 10px 0; color: #c2185b;">キャンセル額</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #c2185b;">¥${cancelledAmount.toLocaleString()}</div>
+                            <small style="color: #666;">累計キャンセル金額</small>
                         </div>
                         <div class="stat-card" style="background: #ede7f6; padding: 15px; border-radius: 8px; text-align: center;">
-                            <h4 style="margin: 0 0 10px 0; color: #5e35b1;">ちんちろ調整累計</h4>
-                            <div style="font-size: 2em; font-weight: bold; color: #5e35b1;">¥${salesStats.chinchiroAdjustments.total.toLocaleString()}</div>
-                            <small style="color: #666;">+¥${salesStats.chinchiroAdjustments.positive.toLocaleString()} / -¥${Math.abs(salesStats.chinchiroAdjustments.negative).toLocaleString()}</small>
+                            <h4 style="margin: 0 0 10px 0; color: #5e35b1;">キャンセル率</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #5e35b1;">${cancelRate}%</div>
+                            <small style="color: #666;">キャンセル ${cancelled.toLocaleString()} 件</small>
                         </div>
-                    </div>
-                    
-                    <!-- 商品別売上 -->
-                    <div style="margin: 30px 0;">
-                        <h4>📈 商品別売上統計</h4>
-                        <div class="sales-table" style="overflow-x: auto;">
-                            <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
-                                <thead>
-                                    <tr style="background: #f5f5f5;">
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">商品名</th>
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: center;">販売数</th>
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">売上金額</th>
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">構成比</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    ${salesStats.itemStats.map(item => `
-                                        <tr>
-                                            <td style="padding: 10px; border: 1px solid #ddd;">${item.name}</td>
-                                            <td style="padding: 10px; border: 1px solid #ddd; text-align: center; font-weight: bold;">${item.quantity}</td>
-                                            <td style="padding: 10px; border: 1px solid #ddd; text-align: right; font-weight: bold;">¥${item.revenue.toLocaleString()}</td>
-                                            <td style="padding: 10px; border: 1px solid #ddd; text-align: right;">${item.percentage.toFixed(1)}%</td>
-                                        </tr>
-                                    `).join('')}
-                                </tbody>
-                            </table>
+                        ${adjustment !== 0 ? `
+                        <div class="stat-card" style="background: #e0f7fa; padding: 15px; border-radius: 8px; text-align: center;">
+                            <h4 style="margin: 0 0 10px 0; color: #00796b;">調整差額</h4>
+                            <div style="font-size: 2em; font-weight: bold; color: #00796b;">¥${adjustment.toLocaleString()}</div>
+                            <small style="color: #666;">総売上 (毛) ¥${grossSales.toLocaleString()}</small>
                         </div>
-                    </div>
-                    
-                    <!-- 注文状況 -->
-                    <div style="margin: 30px 0;">
-                        <h4>📋 注文状況内訳</h4>
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 15px;">
-                            <div style="background: #fff9c4; padding: 10px; border-radius: 5px; text-align: center;">
-                                <div style="font-weight: bold; color: #f57c00;">調理中</div>
-                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.COOKING || 0}</div>
-                            </div>
-                            <div style="background: #c8e6c9; padding: 10px; border-radius: 5px; text-align: center;">
-                                <div style="font-weight: bold; color: #388e3c;">調理完了</div>
-                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.DONE || 0}</div>
-                            </div>
-                            <div style="background: #b3e5fc; padding: 10px; border-radius: 5px; text-align: center;">
-                                <div style="font-weight: bold; color: #0277bd;">品出し完了</div>
-                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.READY || 0}</div>
-                            </div>
-                            <div style="background: #e1bee7; padding: 10px; border-radius: 5px; text-align: center;">
-                                <div style="font-weight: bold; color: #7b1fa2;">提供済み</div>
-                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.DELIVERED || 0}</div>
-                            </div>
-                            <div style="background: #ffcdd2; padding: 10px; border-radius: 5px; text-align: center;">
-                                <div style="font-weight: bold; color: #d32f2f;">キャンセル</div>
-                                <div style="font-size: 1.5em; margin: 5px 0;">${salesStats.statusCounts.CANCELLED || 0}</div>
-                            </div>
-                        </div>
+                        ` : ''}
                     </div>
 
-                    <div style="margin: 30px 0;">
-                        <h4>🗂️ 最近アーカイブ済み注文</h4>
-                        ${archivedOrders.length === 0 ? '<p>品出し済みの注文はまだありません</p>' : `
-                        <div style="overflow-x: auto;">
-                            <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
-                                <thead>
-                                    <tr style="background: #f5f5f5;">
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">注文番号</th>
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">最終状態</th>
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: right;">金額</th>
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">アーカイブ時刻</th>
-                                        <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">内容</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    ${archivedOrders.map(order => {
-                                        const total = calculateOrderTotal(order);
-                                        const status = getStatusLabel(order.status || 'UNKNOWN');
-                                        const when = formatArchivedTimestamp(order.archivedAt);
-                                        const itemsText = order.items
-                                            .map(item => `${item.name}×${item.qty}`)
-                                            .join(' / ');
-                                        return `
-                                            <tr>
-                                                <td style="padding: 10px; border: 1px solid #ddd;">#${order.orderNo}</td>
-                                                <td style="padding: 10px; border: 1px solid #ddd;">${status}</td>
-                                                <td style="padding: 10px; border: 1px solid #ddd; text-align: right; font-weight: bold;">¥${total.toLocaleString()}</td>
-                                                <td style="padding: 10px; border: 1px solid #ddd;">${when}</td>
-                                                <td style="padding: 10px; border: 1px solid #ddd;">${itemsText}</td>
-                                            </tr>
-                                        `;
-                                    }).join('')}
-                                </tbody>
-                            </table>
-                        </div>
-                        `}
+                    <div style="margin-top: 30px; padding: 12px; background: #f8f9fa; border-radius: 6px; font-size: 0.9em; color: #555;">
+                        <strong>更新時刻:</strong> ${updatedAt}
                     </div>
-                    
+                </div>
+            `;
+        } else {
+            tabContent = `
+                <div class="card">
+                    <h3>売上確認</h3>
+                    <p>売上サマリを表示できませんでした。もう一度読み込んでください。</p>
+                    <button class="btn btn-primary" onclick="fetchSalesSummary(true)">再読込</button>
                 </div>
             `;
         }
     } else if (state.settingsTab === 'chinchiro') {
         tabContent = `
             <div class="card">
-                <h3>🎲 ちんちろ設定</h3>
-                <div style="margin: 20px 0;">
-                    <label style="display: flex; align-items: center; gap: 10px; font-size: 1.1em;">
-                        <input type="checkbox" ${state.data.settings.chinchiro.enabled ? 'checked' : ''} id="chinchiro-enabled" style="width: 20px; height: 20px;"> 
-                        <span>ちんちろ機能を有効にする</span>
-                    </label>
-                    <small style="display: block; margin-top: 5px; color: #666;">有効にすると、注文画面でセット商品の価格倍率を選択できます</small>
-                </div>
-                
-                <div style="margin: 20px 0;">
-                    <h4>倍率設定</h4>
-                    <p style="color: #666; font-size: 0.9em;">カンマ区切りで倍率を指定（例: 0,0.5,1,2,3）</p>
-                    <input type="text" value="${state.data.settings.chinchiro.multipliers.join(',')}" id="chinchiro-multipliers" 
-                           style="width: 100%; padding: 10px; font-size: 1em; border: 1px solid #ddd; border-radius: 5px;">
-                    <div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 5px;">
-                        <strong>倍率の意味:</strong>
-                        <ul style="margin: 5px 0; padding-left: 20px;">
-                            <li><code>0</code> = 無料（ピンゾロ）</li>
-                            <li><code>0.5</code> = 半額</li>
-                            <li><code>1</code> = 通常価格（変更なし）</li>
-                            <li><code>2</code> = 2倍</li>
-                            <li><code>3</code> = 3倍</li>
-                        </ul>
+                <div class="settings-header">
+                    <div>
+                        <h3>🎲 ちんちろ設定</h3>
+                        <p class="settings-subtitle">セット商品の倍率と丸め方法を調整します</p>
                     </div>
                 </div>
-                
-                <div style="margin: 20px 0;">
-                    <h4>丸め方式</h4>
-                    <p style="color: #666; font-size: 0.9em;">調整額に小数が出た場合の処理方法</p>
-                    <select id="chinchiro-rounding" style="width: 100%; padding: 10px; font-size: 1em; border: 1px solid #ddd; border-radius: 5px;">
-                        <option value="round" ${state.data.settings.chinchiro.rounding === 'round' ? 'selected' : ''}>四捨五入</option>
-                        <option value="floor" ${state.data.settings.chinchiro.rounding === 'floor' ? 'selected' : ''}>切り捨て（お客様有利）</option>
-                        <option value="ceil" ${state.data.settings.chinchiro.rounding === 'ceil' ? 'selected' : ''}>切り上げ（店舗有利）</option>
-                    </select>
+
+                <div class="settings-panel">
+                    <section class="settings-section">
+                        <h4>利用可否</h4>
+                        <label class="settings-toggle">
+                            <input type="checkbox" ${state.data.settings.chinchiro.enabled ? 'checked' : ''} id="chinchiro-enabled">
+                            <span>ちんちろ機能を有効にする</span>
+                        </label>
+                        <p class="settings-note">有効にすると、注文画面でセット商品の価格倍率を選択できます。</p>
+                    </section>
+
+                    <section class="settings-section">
+                        <h4>倍率設定</h4>
+                        <p class="settings-note">カンマ区切りで倍率を指定（例: 0,0.5,1,2,3）</p>
+                        <div class="settings-field">
+                            <label for="chinchiro-multipliers">倍率リスト</label>
+                            <input type="text" value="${state.data.settings.chinchiro.multipliers.join(',')}" id="chinchiro-multipliers">
+                        </div>
+                        <div class="settings-field">
+                            <strong>倍率の意味</strong>
+                            <ul class="settings-list">
+                                <li><code>0</code> = 無料（ピンゾロ）</li>
+                                <li><code>0.5</code> = 半額</li>
+                                <li><code>1</code> = 通常価格（変更なし）</li>
+                                <li><code>2</code> = 2倍</li>
+                                <li><code>3</code> = 3倍</li>
+                            </ul>
+                        </div>
+                    </section>
+
+                    <section class="settings-section">
+                        <h4>丸め方式</h4>
+                        <p class="settings-note">調整額に小数が出た場合の処理方法</p>
+                        <div class="settings-field">
+                            <label for="chinchiro-rounding">丸め方法</label>
+                            <select id="chinchiro-rounding">
+                                <option value="round" ${state.data.settings.chinchiro.rounding === 'round' ? 'selected' : ''}>四捨五入</option>
+                                <option value="floor" ${state.data.settings.chinchiro.rounding === 'floor' ? 'selected' : ''}>切り捨て（お客様有利）</option>
+                                <option value="ceil" ${state.data.settings.chinchiro.rounding === 'ceil' ? 'selected' : ''}>切り上げ（店舗有利）</option>
+                            </select>
+                        </div>
+                    </section>
                 </div>
-                
-                <button class="btn btn-primary btn-large" onclick="saveChinchoiroSettings()" style="width: 100%; margin-top: 20px;">
-                    💾 設定を保存
-                </button>
+
+                <div class="settings-actions">
+                    <button class="btn btn-primary btn-large" onclick="saveChinchoiroSettings()">💾 設定を保存</button>
+                </div>
             </div>
         `;
     } else if (state.settingsTab === 'qrprint') {
         tabContent = `
             <div class="card">
-                <h3>🖨️ プリント設定</h3>
-                <p style="color: #666; margin-bottom: 20px;">レシート印刷時のQRコード設定</p>
-                
-                <div style="margin: 20px 0;">
-                    <label style="display: flex; align-items: center; gap: 10px; font-size: 1.1em;">
-                        <input type="checkbox" ${state.data.settings.qrPrint.enabled ? 'checked' : ''} id="qrprint-enabled" style="width: 20px; height: 20px;"> 
-                        <span>QRコード印刷を有効にする</span>
-                    </label>
-                    <small style="display: block; margin-top: 5px; color: #666;">有効にすると、レシートの最後にQRコードが印刷されます</small>
-                </div>
-                
-                <div style="margin: 20px 0;">
-                    <h4>QRコード内容</h4>
-                    <p style="color: #666; font-size: 0.9em;">URL、メッセージ等を入力してください</p>
-                    <textarea id="qrprint-content" 
-                              style="width: 100%; padding: 10px; font-size: 1em; border: 1px solid #ddd; border-radius: 5px; min-height: 100px; resize: vertical;"
-                              placeholder="例: https://example.com&#10;またはメッセージテキスト">${state.data.settings.qrPrint.content || ''}</textarea>
-                    <div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 5px;">
-                        <strong>使用例:</strong>
-                        <ul style="margin: 5px 0; padding-left: 20px;">
-                            <li>店舗ウェブサイトURL</li>
-                            <li>アンケートフォーム</li>
-                            <li>SNSアカウント</li>
-                            <li>クーポンコード</li>
-                            <li>お礼メッセージ</li>
-                        </ul>
+                <div class="settings-header">
+                    <div>
+                        <h3>🖨️ プリント設定</h3>
+                        <p class="settings-subtitle">レシート印刷時のQRコード設定</p>
                     </div>
                 </div>
-                
-                <button class="btn btn-primary btn-large" onclick="saveQrPrintSettings()" style="width: 100%; margin-top: 20px;">
-                    💾 設定を保存
-                </button>
+
+                <div class="settings-panel">
+                    <section class="settings-section">
+                        <h4>QRコード印刷</h4>
+                        <label class="settings-toggle">
+                            <input type="checkbox" ${state.data.settings.qrPrint.enabled ? 'checked' : ''} id="qrprint-enabled">
+                            <span>QRコード印刷を有効にする</span>
+                        </label>
+                        <p class="settings-note">有効にすると、レシートの最後にQRコードが印刷されます。</p>
+                    </section>
+
+                    <section class="settings-section">
+                        <h4>QRコード内容</h4>
+                        <p class="settings-note">URL、メッセージ等を入力してください</p>
+                        <div class="settings-field">
+                            <label for="qrprint-content">印刷する内容</label>
+                            <textarea id="qrprint-content" placeholder="例: https://example.com&#10;またはメッセージテキスト">${state.data.settings.qrPrint.content || ''}</textarea>
+                        </div>
+                        <div class="settings-field">
+                            <strong>使用例</strong>
+                            <ul class="settings-list">
+                                <li>店舗ウェブサイトURL</li>
+                                <li>アンケートフォーム</li>
+                                <li>SNSアカウント</li>
+                                <li>クーポンコード</li>
+                                <li>お礼メッセージ</li>
+                            </ul>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="settings-actions">
+                    <button class="btn btn-primary btn-large" onclick="saveQrPrintSettings()">💾 設定を保存</button>
+                </div>
             </div>
         `;
     }
@@ -1166,6 +1188,9 @@ function renderExportPage() {
                 <button class="btn btn-success btn-large" onclick="downloadCsv()" style="flex: 1; min-width: 200px; font-size: 1.2em; padding: 15px 25px;">
                     CSV エクスポート
                 </button>
+                <button class="btn btn-primary btn-large" onclick="downloadSalesSummaryLite()" style="flex: 1; min-width: 200px; font-size: 1.2em; padding: 15px 25px;">
+                    売上サマリ(Lite)出力
+                </button>
                 <button class="btn btn-warning btn-large" onclick="restoreLatest()" style="flex: 1; min-width: 200px; font-size: 1.2em; padding: 15px 25px;">
                     復旧ボタン
                 </button>
@@ -1209,7 +1234,7 @@ function setupPageEvents() {
         stopMemoryMonitor();
     }
     if (state.settingsTab === 'sales') {
-        ensureArchivedOrders();
+        ensureSalesSummary();
     }
 }
 
@@ -1920,7 +1945,7 @@ async function completeOrder(orderNo) {
 function switchSettingsTab(tab) {
     state.settingsTab = tab;
     if (tab === 'sales') {
-        ensureArchivedOrders();
+        ensureSalesSummary();
     }
     render();
 }
@@ -2268,6 +2293,10 @@ async function downloadCsv() {
     }
 }
 
+function downloadSalesSummaryLite() {
+    window.open('/api/export/sales-summary-lite', '_blank');
+}
+
 function downloadSnapshotJson() {
     window.open('/api/export/snapshot', '_blank');
 }
@@ -2279,10 +2308,15 @@ function showSessionEndDialog() {
         <div class="modal-content session-dialog">
             <h2>営業データのエクスポートが完了しました</h2>
             <p>今後の営業をどうしますか？</p>
+            <p class="session-note">📶 売上確認ツールにアップロードする場合は、先に端末のWi-Fiをアップロード用ネットワークへ切り替えてください。</p>
             <div class="session-options">
                 <button class="btn btn-success btn-large" onclick="continueSession()">
                     🔄 営業を続ける
                     <small>現在のデータをそのまま継続</small>
+                </button>
+                <button class="btn btn-primary btn-large" onclick="openSalesSummaryUploader()">
+                    📤 売上確認画面を開く
+                    <small>Wi-Fi切替後にタップ（外部サイト）</small>
                 </button>
                 <button class="btn btn-warning btn-large" onclick="confirmEndSession()">
                     🏁 営業セッション終了
@@ -2302,10 +2336,7 @@ function showSessionEndDialog() {
 }
 
 function continueSession() {
-    const modal = document.querySelector('.modal-overlay');
-    if (modal) {
-        document.body.removeChild(modal);
-    }
+    closeSessionDialog();
     alert('営業を継続します。現在のデータが保持されます。');
 }
 
@@ -2484,10 +2515,10 @@ function getStatusActions(order) {
             </button>
         `);
     }
-    
+
     if (order.status === 'DONE' && !order.picked_up) {
         actions.push(`
-            <button class="btn btn-secondary" onclick="updateOrderStatus('${order.orderNo}', 'READY')" 
+            <button class="btn btn-primary" onclick="updateOrderStatus('${order.orderNo}', 'READY')" 
                     style="width: 100%; margin-top: 5px; font-size: 1.6em; padding: 20px 30px;">
                 📌 品出し完了
             </button>
@@ -2568,7 +2599,7 @@ async function resetSystem() {
 
             await loadStateData();
             
-            cart = [];
+            state.cart = [];
             updateCartDisplay();
             
         } else {
@@ -2701,94 +2732,9 @@ function getStatusColor(status) {
     return colors[status] || '#6c757d';
 }
 
-
-function calculateSalesStats() {
-    if (!state.data || !state.data.orders) {
-        return {
-            totalOrders: 0,
-            totalRevenue: 0,
-            averageOrder: 0,
-            totalItems: 0,
-            itemStats: [],
-            statusCounts: {},
-            chinchiroAdjustments: { total: 0, positive: 0, negative: 0, count: 0 }
-        };
-    }
-    
-    const inMemoryOrders = state.data.orders.filter(order => order.status !== 'CANCELLED');
-    const archivedOrders = state.archived.orders.filter(order => order.status !== 'CANCELLED');
-    const orders = [...inMemoryOrders, ...archivedOrders];
-    const itemMap = new Map();
-    const statusCounts = {};
-    const chinchiroAdjustments = { total: 0, positive: 0, negative: 0, count: 0 };
-    
-    let totalRevenue = 0;
-    let totalItems = 0;
-    let productsRevenue = 0;
-
-    orders.forEach(order => {
-        statusCounts[order.status] = (statusCounts[order.status] || 0) + 1;
-        order.items.forEach(item => {
-            const unitPrice = item.unitPriceApplied || item.unitPrice || 0;
-            const qty = item.qty || 1;
-            const discount = item.discountValue || 0;
-            const itemTotal = (unitPrice * qty) - discount;
-
-            if (item.kind === "ADJUST") {
-                totalRevenue += itemTotal;
-                chinchiroAdjustments.total += itemTotal;
-                if (itemTotal > 0) {
-                    chinchiroAdjustments.positive += itemTotal;
-                } else if (itemTotal < 0) {
-                    chinchiroAdjustments.negative += itemTotal;
-                }
-                chinchiroAdjustments.count += qty;
-                return;
-            }
-            
-            totalRevenue += itemTotal;
-            productsRevenue += itemTotal;
-            totalItems += qty;
-            
-            const itemName = item.name;
-            if (itemMap.has(itemName)) {
-                const existing = itemMap.get(itemName);
-                existing.quantity += qty;
-                existing.revenue += itemTotal;
-            } else {
-                itemMap.set(itemName, {
-                    name: itemName,
-                    quantity: qty,
-                    revenue: itemTotal
-                });
-            }
-        });
-    });
-
-    const itemStats = Array.from(itemMap.values())
-        .sort((a, b) => b.revenue - a.revenue)
-        .map(item => ({
-            ...item,
-            percentage: productsRevenue > 0 ? (item.revenue / productsRevenue) * 100 : 0
-        }));
-    
-    const averageOrder = orders.length > 0 ? Math.round(totalRevenue / orders.length) : 0;
-    
-    return {
-        totalOrders: orders.length,
-        totalRevenue: totalRevenue,
-        averageOrder: averageOrder,
-        totalItems: totalItems,
-        itemStats: itemStats,
-        statusCounts: statusCounts,
-        chinchiroAdjustments: chinchiroAdjustments
-    };
-}
-
 function refreshSalesStats() {
     if (state.settingsTab === 'sales') {
-        ensureArchivedOrders(true);
-        render(); 
+        fetchSalesSummary(true);
     }
 }
 
@@ -2852,4 +2798,19 @@ async function reprintReceipt(orderNo) {
         console.error('[reprintReceipt] 通信エラー:', error);
         alert(`❌ 通信エラー: ${error.message}\n\nネットワーク接続を確認してください。`);
     }
+}
+
+function closeSessionDialog() {
+    const modal = document.querySelector('.modal-overlay');
+    if (modal) {
+        modal.remove();
+    }
+}
+
+function openSalesSummaryUploader() {
+    if (!confirm('売上確認ページを開く前に、Wi-Fiをアップロード用ネットワークへ切り替えましたか？\nOKを押すと外部サイトが開きます。')) {
+        return;
+    }
+    closeSessionDialog();
+    window.open('https://kds-checker.vercel.app/upload', '_blank');
 }
