@@ -119,6 +119,10 @@ bool archiveForEach(const String& sessionIdFilter, ArchiveOrderVisitor visitor, 
 bool archiveFindOrder(const String& sessionIdFilter, const String& orderNo, Order& outOrder, uint32_t* archivedAt = nullptr);
 bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t archivedAt);
 
+const String& getMenuEtag();
+void refreshMenuEtag();
+void bumpCatalogVersion();
+
 bool snapshotSave();
 bool snapshotLoad();
 void requestSnapshotSave();

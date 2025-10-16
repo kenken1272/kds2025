@@ -3,6 +3,8 @@ const state = {
     ws: null,
     online: false,
     data: null,
+    menu: [],
+    menuEtag: null,
     cart: [],
     settingsTab: 'main',
     callList: [],
@@ -36,6 +38,74 @@ function scheduleStateReload() {
             console.error('状態再取得スケジュール失敗:', error);
         }
     }, 400);
+}
+
+function renderMenu() {
+    if (!state.data) {
+        return;
+    }
+    state.data.menu = state.menu;
+    if (state.page === 'order' || state.page === 'settings') {
+        render();
+    }
+}
+
+async function loadMenu(options = {}) {
+    const { force = false } = options;
+    try {
+        const headers = {};
+        if (!force && state.menuEtag) {
+            headers['If-None-Match'] = state.menuEtag;
+        }
+        const response = await fetch('/api/menu', {
+            method: 'GET',
+            headers,
+            cache: 'no-cache'
+        });
+
+        if (response.status === 304) {
+            if (state.data) {
+                state.data.menu = state.menu;
+            }
+            return false;
+        }
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const etag = response.headers.get('ETag');
+        if (etag) {
+            state.menuEtag = etag;
+        }
+
+        const payload = await response.json();
+        state.menu = Array.isArray(payload.menu) ? payload.menu : [];
+        if (state.data) {
+            state.data.menu = state.menu;
+            renderMenu();
+        }
+        console.log('メニュー取得完了:', { count: state.menu.length, etag: state.menuEtag });
+        return true;
+    } catch (error) {
+        console.error('loadMenu failed', error);
+        return false;
+    }
+}
+
+async function appInit() {
+    try {
+        try {
+            await syncTimeOnce();
+        } catch (error) {
+            console.warn('初期時刻同期に失敗しましたが継続します:', error);
+        }
+        await loadMenu({ force: true });
+        await loadStateData();
+        fetchSalesSummary(true);
+    } finally {
+        connectWs();
+    }
 }
 
 function getOrderFromState(orderNo) {
@@ -77,20 +147,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     setupNavigation();
-
-    syncTimeOnce().then(() => {
-        console.log('初期時刻同期完了 - データ取得開始');
-        loadStateData();
-        fetchSalesSummary(true);
-    }).catch(err => {
-        console.error('初期時刻同期失敗:', err);
-        loadStateData();
-        fetchSalesSummary(true);
-    });
-
     setInterval(syncTimeOnce, 5 * 60 * 1000);
 
-    connectWs();
+    appInit().catch(err => console.error('初期化処理に失敗しました:', err));
 
     reconnectBtn.addEventListener('click', connectWs);
 
@@ -161,12 +220,12 @@ async function loadStateData(options = {}) {
             throw new Error(`HTTP ${response.status}`);
         }
 
-        const previousMenu = state.data && Array.isArray(state.data.menu) ? state.data.menu : null;
         const payload = await response.json();
         state.data = payload;
-        if (preferLight && previousMenu && (!Array.isArray(state.data.menu) || state.data.menu.length === 0)) {
-            state.data.menu = previousMenu;
+        if (Array.isArray(payload.menu)) {
+            state.menu = payload.menu;
         }
+        state.data.menu = state.menu;
 
         console.log('状態データ取得完了:', state.data);
 
@@ -416,6 +475,10 @@ function connectWs() {
             if (data.type === 'hello') {
                 console.log('サーバーから挨拶:', data.msg);
             } else if (data.type === 'sync.snapshot') {
+                loadMenu();
+                scheduleStateReload();
+            } else if (data.type === 'system.reset') {
+                loadMenu({ force: true });
                 scheduleStateReload();
             } else if (data.type === 'order.created' || data.type === 'order.updated') {
                 scheduleStateReload();
@@ -2018,7 +2081,8 @@ async function saveMainProducts() {
         
         if (response.ok) {
             alert('メイン商品を保存しました');
-            loadStateData();
+            await loadMenu({ force: true });
+            await loadStateData({ forceFull: true });
         } else {
             alert('保存に失敗しました');
         }
@@ -2092,7 +2156,8 @@ async function saveSideProducts() {
         
         if (response.ok) {
             alert('サイド商品を保存しました');
-            loadStateData();
+            await loadMenu({ force: true });
+            await loadStateData({ forceFull: true });
         } else {
             alert('保存に失敗しました');
         }
@@ -2292,6 +2357,7 @@ async function saveMenuItemImmediate(item) {
         
         if (response.ok) {
             console.log(`✅ 商品を更新しました: ${item.name} (${item.sku})`);
+            await loadMenu({ force: true });
         } else {
             console.error('❌ 商品の更新に失敗しました:', await response.text());
         }

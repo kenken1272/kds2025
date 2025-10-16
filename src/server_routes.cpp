@@ -299,6 +299,7 @@ static void processCancelRequest(AsyncWebServerRequest *request, const uint8_t *
 }
 
 void initHttpRoutes(AsyncWebServer &server) {
+  refreshMenuEtag();
   server.on("/api/ping", HTTP_GET, [](AsyncWebServerRequest *request) {
     JsonDocument doc;
     doc["ok"] = true;
@@ -308,9 +309,44 @@ void initHttpRoutes(AsyncWebServer &server) {
     Serial.printf("API /ping 応答: %s\n", res.c_str());
   });
 
+  server.on("/api/menu", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const String& etag = getMenuEtag();
+    const AsyncWebHeader* ifNoneMatch = request->hasHeader("If-None-Match") ? request->getHeader("If-None-Match") : nullptr;
+    if (ifNoneMatch && ifNoneMatch->value() == etag) {
+      AsyncWebServerResponse* response = request->beginResponse(304);
+      response->addHeader("ETag", etag);
+      response->addHeader("Cache-Control", "max-age=120, stale-while-revalidate=180");
+      request->send(response);
+      return;
+    }
+
+    DynamicJsonDocument doc(32768);
+    doc["catalogVersion"] = S().settings.catalogVersion;
+    JsonArray menu = doc.createNestedArray("menu");
+    for (const auto& it : S().menu) {
+      JsonObject o = menu.add<JsonObject>();
+      o["sku"] = it.sku;
+      o["name"] = it.name;
+      o["nameRomaji"] = it.nameRomaji;
+      o["category"] = it.category;
+      o["active"] = it.active;
+      o["price_normal"] = it.price_normal;
+      o["price_presale"] = it.price_presale;
+      o["presale_discount_amount"] = it.presale_discount_amount;
+      o["price_single"] = it.price_single;
+      o["price_as_side"] = it.price_as_side;
+    }
+
+    String res; serializeJson(doc, res);
+    AsyncWebServerResponse* response = request->beginResponse(200, "application/json", res);
+    response->addHeader("ETag", etag);
+    response->addHeader("Cache-Control", "max-age=120, stale-while-revalidate=180");
+    request->send(response);
+  });
+
   server.on("/api/state", HTTP_GET, [](AsyncWebServerRequest *request) {
     bool light = request->hasParam("light") && request->getParam("light")->value() == "1";
-    size_t menuCount = S().menu.size();
+    size_t menuCount = light ? 0 : S().menu.size();
     size_t orderCount = S().orders.size();
     if (light && orderCount > 60) {
       orderCount = 60;
@@ -338,19 +374,21 @@ void initHttpRoutes(AsyncWebServer &server) {
     doc["printer"]["paperOut"]  = S().printer.paperOut;
     doc["printer"]["overheat"]  = S().printer.overheat;
     doc["printer"]["holdJobs"]  = S().printer.holdJobs;
-    JsonArray menuArray = doc["menu"].to<JsonArray>();
-    for (const auto& it : S().menu) {
-      JsonObject o = menuArray.add<JsonObject>();
-      o["sku"]   = it.sku;
-      o["name"]  = it.name;
-      o["nameRomaji"] = it.nameRomaji;
-      o["category"]   = it.category;
-      o["active"]     = it.active;
-      o["price_normal"] = it.price_normal;
-      o["price_presale"] = it.price_presale;
-      o["presale_discount_amount"] = it.presale_discount_amount;
-      o["price_single"]   = it.price_single;
-      o["price_as_side"]  = it.price_as_side;
+    if (!light) {
+      JsonArray menuArray = doc["menu"].to<JsonArray>();
+      for (const auto& it : S().menu) {
+        JsonObject o = menuArray.add<JsonObject>();
+        o["sku"]   = it.sku;
+        o["name"]  = it.name;
+        o["nameRomaji"] = it.nameRomaji;
+        o["category"]   = it.category;
+        o["active"]     = it.active;
+        o["price_normal"] = it.price_normal;
+        o["price_presale"] = it.price_presale;
+        o["presale_discount_amount"] = it.presale_discount_amount;
+        o["price_single"]   = it.price_single;
+        o["price_as_side"]  = it.price_as_side;
+      }
     }
 
     JsonArray ordersArray = doc["orders"].to<JsonArray>();
@@ -381,6 +419,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         return;
       }
 
+      bool touchedMenu = false;
       if (doc["items"].is<JsonArray>()) {
         for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
           String id   = v["id"]   | "";
@@ -410,7 +449,11 @@ void initHttpRoutes(AsyncWebServer &server) {
             m.active = active;
             S().menu.push_back(m);
           }
+          touchedMenu = true;
         }
+      }
+      if (touchedMenu) {
+        bumpCatalogVersion();
       }
       // WAL記録（JSON形式）
       for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
@@ -423,6 +466,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         walDoc["price_normal"] = v["price_normal"] | 0;
         walDoc["presale_discount_amount"] = v["presale_discount_amount"] | 0;
         walDoc["active"] = v["active"] | true;
+        walDoc["catalogVersion"] = S().settings.catalogVersion;
         String walLine; serializeJson(walDoc, walLine);
         walAppend(walLine);
       }
@@ -439,6 +483,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         return;
       }
 
+      bool touchedMenu = false;
       if (doc["items"].is<JsonArray>()) {
         for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
           String id   = v["id"]   | "";
@@ -468,7 +513,11 @@ void initHttpRoutes(AsyncWebServer &server) {
             m.active = active;
             S().menu.push_back(m);
           }
+          touchedMenu = true;
         }
+      }
+      if (touchedMenu) {
+        bumpCatalogVersion();
       }
       // WAL記録（JSON形式）
       for (JsonVariantConst v : doc["items"].as<JsonArrayConst>()) {
@@ -481,6 +530,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         walDoc["price_single"] = v["price_single"] | 0;
         walDoc["price_as_side"] = v["price_as_side"] | 0;
         walDoc["active"] = v["active"] | true;
+        walDoc["catalogVersion"] = S().settings.catalogVersion;
         String walLine; serializeJson(walDoc, walLine);
         walAppend(walLine);
       }

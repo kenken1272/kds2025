@@ -13,9 +13,49 @@
 static State g_state;
 static SalesSummary g_salesSummary;
 static volatile bool g_snapshotSaveRequested = false;
+static String g_menuEtag;
 
 State& S() {
     return g_state;
+}
+
+static String buildMenuEtagValue() {
+    uint32_t version = S().settings.catalogVersion;
+    if (version == 0) {
+        version = 1;
+        S().settings.catalogVersion = version;
+    }
+    String etag("\"v-");
+    etag += String(version);
+    etag += '\"';
+    return etag;
+}
+
+const String& getMenuEtag() {
+    if (g_menuEtag.isEmpty()) {
+        g_menuEtag = buildMenuEtagValue();
+    }
+    return g_menuEtag;
+}
+
+void refreshMenuEtag() {
+    g_menuEtag = buildMenuEtagValue();
+}
+
+void bumpCatalogVersion() {
+    uint32_t current = S().settings.catalogVersion;
+    if (current == 0) {
+        current = 1;
+    } else if (current == 0xFFFFFFFFu) {
+        current = 1;
+    } else {
+        current += 1;
+        if (current == 0) {
+            current = 1;
+        }
+    }
+    S().settings.catalogVersion = current;
+    refreshMenuEtag();
 }
 
 void requestSnapshotSave() {
@@ -1028,6 +1068,7 @@ static bool populateStateFromSnapshotDoc(const JsonDocument& doc, const char* so
         ensureInitialMenu();
     }
 
+    refreshMenuEtag();
     return true;
 }
 
@@ -1316,6 +1357,11 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                     }
                     S().menu.push_back(newItem);
                 }
+                uint32_t walCatalog = doc["catalogVersion"] | static_cast<uint32_t>(0);
+                if (walCatalog > 0) {
+                    S().settings.catalogVersion = walCatalog;
+                }
+                refreshMenuEtag();
                 appliedEntry = true;
             }
         }
@@ -1401,6 +1447,7 @@ bool recoverToLatest(String &outLastTs) {
     if (!recalculateSalesSummary()) {
         Serial.println("[E] recover sales summary failed");
     }
+    refreshMenuEtag();
     
     Serial.println("[RECOVER] ok");
     return true;
@@ -1482,7 +1529,10 @@ void createInitialMenuItems() {
     potato.price_single = 300;
     potato.price_as_side = 150;
     S().menu.push_back(potato);
-    
+    if (S().settings.catalogVersion == 0) {
+        S().settings.catalogVersion = 1;
+    }
+    refreshMenuEtag();
 }
 
 void ensureInitialMenu() {
