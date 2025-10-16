@@ -12,9 +12,20 @@
 
 static State g_state;
 static SalesSummary g_salesSummary;
+static volatile bool g_snapshotSaveRequested = false;
 
 State& S() {
     return g_state;
+}
+
+void requestSnapshotSave() {
+    g_snapshotSaveRequested = true;
+}
+
+bool consumeSnapshotSaveRequest() {
+    bool requested = g_snapshotSaveRequested;
+    g_snapshotSaveRequested = false;
+    return requested;
 }
 
 static Preferences prefs;
@@ -61,7 +72,7 @@ bool saveSalesSummary() {
 
     File file = LittleFS.open(kSalesSummaryPath, "w");
     if (!file) {
-        Serial.printf("[SALES] サマリ保存失敗: %s\n", kSalesSummaryPath);
+        Serial.printf("[E] sales summary save failed: %s\n", kSalesSummaryPath);
         return false;
     }
 
@@ -70,41 +81,16 @@ bool saveSalesSummary() {
     file.flush();
     file.close();
 
-    Serial.printf("[SALES] サマリ保存: orders=%lu, cancelled=%lu, revenue=%lld, cancelledAmount=%lld\n",
-                  static_cast<unsigned long>(g_salesSummary.confirmedOrders),
-                  static_cast<unsigned long>(g_salesSummary.cancelledOrders),
-                  static_cast<long long>(g_salesSummary.revenue),
-                  static_cast<long long>(g_salesSummary.cancelledAmount));
-
     return written > 0;
 }
 
 bool recalculateSalesSummary() {
     SalesSummary summary;
 
-    Serial.println("[SALES][DEBUG] ===== 売上サマリ再計算開始 (フロント更新トリガー) =====");
-
-    size_t activeBytes = 0;
-    uint32_t activeCount = 0;
     for (const auto& order : S().orders) {
         accumulateOrderForSummary(summary, order);
-
-        DynamicJsonDocument doc(estimateOrderDocumentCapacity(order));
-        JsonObject obj = doc.to<JsonObject>();
-        orderToJson(obj, order);
-
-        String json;
-        serializeJson(doc, json);
-        activeBytes += json.length();
-        ++activeCount;
-        Serial.printf("[SALES][DEBUG] RAM注文[%u]: %s\n", activeCount, json.c_str());
     }
-    Serial.printf("[SALES][DEBUG] RAM注文合計: %lu件, %lu bytes\n",
-                  static_cast<unsigned long>(activeCount),
-                  static_cast<unsigned long>(activeBytes));
 
-    size_t archiveBytes = 0;
-    uint32_t archiveLines = 0;
     if (LittleFS.exists(kArchivePath)) {
         File archiveFile = LittleFS.open(kArchivePath, "r");
         if (archiveFile) {
@@ -114,19 +100,11 @@ bool recalculateSalesSummary() {
                 if (line.isEmpty()) {
                     continue;
                 }
-                ++archiveLines;
-                archiveBytes += line.length();
-                Serial.printf("[SALES][DEBUG] ARCHIVE行[%u]: %s\n", archiveLines, line.c_str());
             }
             archiveFile.close();
-            Serial.printf("[SALES][DEBUG] ARCHIVE合計: %lu行, %lu bytes\n",
-                          static_cast<unsigned long>(archiveLines),
-                          static_cast<unsigned long>(archiveBytes));
         } else {
-            Serial.println("[SALES][DEBUG] ARCHIVEファイルオープン失敗: /kds/orders_archive.jsonl");
+            Serial.println("[E] archive open failed: /kds/orders_archive.jsonl");
         }
-    } else {
-        Serial.println("[SALES][DEBUG] ARCHIVEファイル不存在: /kds/orders_archive.jsonl");
     }
 
     const String sessionId = S().session.sessionId;
@@ -143,20 +121,17 @@ bool recalculateSalesSummary() {
 
     summary.lastUpdated = static_cast<uint32_t>(time(nullptr));
     g_salesSummary = summary;
-
-    Serial.println("[SALES] サマリ再計算完了");
     return saveSalesSummary();
 }
 
 bool loadSalesSummary() {
     if (!LittleFS.exists(kSalesSummaryPath)) {
-        Serial.println("[SALES] サマリファイルが見つかりません。再計算します");
         return recalculateSalesSummary();
     }
 
     File file = LittleFS.open(kSalesSummaryPath, "r");
     if (!file) {
-        Serial.println("[SALES] サマリファイル読み込み失敗。再計算します");
+        Serial.println("[E] sales summary open failed");
         return recalculateSalesSummary();
     }
 
@@ -164,7 +139,7 @@ bool loadSalesSummary() {
     DeserializationError err = deserializeJson(doc, file);
     file.close();
     if (err) {
-        Serial.printf("[SALES] サマリJSON解析失敗 (%s)。再計算します\n", err.c_str());
+        Serial.printf("[E] sales summary parse failed: %s\n", err.c_str());
         return recalculateSalesSummary();
     }
 
@@ -173,12 +148,6 @@ bool loadSalesSummary() {
     g_salesSummary.revenue = doc["revenue"] | static_cast<int64_t>(0);
     g_salesSummary.cancelledAmount = doc["cancelledAmount"] | static_cast<int64_t>(0);
     g_salesSummary.lastUpdated = doc["lastUpdated"] | static_cast<uint32_t>(0);
-
-    Serial.printf("[SALES] サマリ読込: orders=%lu, cancelled=%lu, revenue=%lld, cancelledAmount=%lld\n",
-                  static_cast<unsigned long>(g_salesSummary.confirmedOrders),
-                  static_cast<unsigned long>(g_salesSummary.cancelledOrders),
-                  static_cast<long long>(g_salesSummary.revenue),
-                  static_cast<long long>(g_salesSummary.cancelledAmount));
 
     return true;
 }
@@ -229,10 +198,9 @@ static bool ensureDataDir() {
         return true;
     }
     if (!LittleFS.mkdir(kDataDir)) {
-        Serial.println("[STORE] ディレクトリ作成失敗: /kds");
+        Serial.println("[E] data dir create failed: /kds");
         return false;
     }
-    Serial.println("[STORE] ディレクトリ作成: /kds");
     return true;
 }
 
@@ -514,7 +482,7 @@ bool archiveForEach(const String& sessionIdFilter, ArchiveOrderVisitor visitor, 
             }
         }
         if (err) {
-            Serial.printf("[ARCHIVE] JSON解析エラーをスキップ: %s (%s)\n", line.c_str(), err.c_str());
+            Serial.printf("[E] archive parse failed: %s\n", err.c_str());
             continue;
         }
 
@@ -525,7 +493,7 @@ bool archiveForEach(const String& sessionIdFilter, ArchiveOrderVisitor visitor, 
 
         JsonVariantConst orderVar = doc["order"];
         if (!orderVar.is<JsonObjectConst>()) {
-            Serial.println("[ARCHIVE] orderデータ形式不正、スキップ");
+            Serial.println("[E] archive order invalid");
             continue;
         }
 
@@ -534,7 +502,7 @@ bool archiveForEach(const String& sessionIdFilter, ArchiveOrderVisitor visitor, 
             JsonObjectConst orderObj = orderVar.as<JsonObjectConst>();
             order.orderNo = orderObj["orderNo"] | String("");
             if (order.orderNo.isEmpty()) {
-                Serial.println("[ARCHIVE] order番号欠落のためスキップ");
+                Serial.println("[E] archive order missing id");
                 continue;
             }
 
@@ -567,8 +535,6 @@ bool archiveForEach(const String& sessionIdFilter, ArchiveOrderVisitor visitor, 
                     order.items.push_back(li);
                 }
             }
-
-            Serial.printf("[ARCHIVE] orderFromJson失敗、フォールバック適用 %s\n", order.orderNo.c_str());
         }
 
         uint32_t archivedAt = doc["archivedAt"] | 0;
@@ -645,7 +611,7 @@ bool archiveAppend(const Order& order, const String& sessionId, uint32_t archive
         file = LittleFS.open(kArchivePath, FILE_WRITE);
     }
     if (!file) {
-        Serial.printf("[ARCHIVE] ファイルオープン失敗: %s\n", kArchivePath);
+        Serial.printf("[E] archive open failed: %s\n", kArchivePath);
         return false;
     }
 
@@ -659,16 +625,18 @@ bool archiveAppend(const Order& order, const String& sessionId, uint32_t archive
     String line;
     serializeJson(root, line);
     if (line.isEmpty()) {
-        Serial.println("[ARCHIVE] シリアライズ失敗");
+        Serial.println("[E] archive serialize failed");
         file.close();
         return false;
     }
 
-    file.println(line);
+    size_t written = file.println(line);
     file.flush();
     file.close();
-
-    Serial.printf("[ARCHIVE] 追記成功: order=%s session=%s\n", order.orderNo.c_str(), sessionId.c_str());
+    if (written == 0) {
+        Serial.println("[E] archive write failed");
+        return false;
+    }
     return true;
 }
 
@@ -686,17 +654,16 @@ bool archiveOrderAndRemove(const String& orderNo, const String& sessionId, uint3
     }
 
     if (index < 0) {
-        Serial.printf("[ARCHIVE] 注文が見つからないためアーカイブできません: %s\n", orderNo.c_str());
+        Serial.printf("[E] archive missing order: %s\n", orderNo.c_str());
         return false;
     }
 
     Order orderCopy = S().orders[index];
 
-    if (!logWal && archiveOrderExists(sessionId, orderNo)) {
-        Serial.printf("[ARCHIVE] 既にアーカイブ済み: %s\n", orderNo.c_str());
-    } else {
+    bool alreadyArchived = !logWal && archiveOrderExists(sessionId, orderNo);
+    if (!alreadyArchived) {
         if (!archiveAppend(orderCopy, sessionId, archivedAt)) {
-            Serial.printf("[ARCHIVE] 追記失敗: %s\n", orderNo.c_str());
+            Serial.printf("[E] archive append failed: %s\n", orderNo.c_str());
             return false;
         }
     }
@@ -704,7 +671,7 @@ bool archiveOrderAndRemove(const String& orderNo, const String& sessionId, uint3
     S().orders.erase(S().orders.begin() + index);
 
     if (logWal) {
-    DynamicJsonDocument walDoc(estimateOrderDocumentCapacity(orderCopy) + 512);
+        DynamicJsonDocument walDoc(estimateOrderDocumentCapacity(orderCopy) + 512);
         walDoc["ts"] = archivedAt;
         walDoc["action"] = "ORDER_ARCHIVE";
         walDoc["orderNo"] = orderCopy.orderNo;
@@ -717,27 +684,20 @@ bool archiveOrderAndRemove(const String& orderNo, const String& sessionId, uint3
         serializeJson(walDoc, walLine);
         walAppend(walLine);
     }
-
-    Serial.printf("[ARCHIVE] アーカイブ完了: %s (session=%s)\n", orderCopy.orderNo.c_str(), sessionId.c_str());
     return true;
 }
 
 bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t archivedAt) {
-    if (!LittleFS.exists(kArchivePath)) {
-        Serial.printf("[ARCHIVE] 置換失敗: ファイルが存在しません (%s)\n", kArchivePath);
-        return false;
-    }
-
     File input = LittleFS.open(kArchivePath, "r");
     if (!input) {
-        Serial.printf("[ARCHIVE] 置換失敗: 読み込み不可 (%s)\n", kArchivePath);
+        Serial.printf("[E] archive replace open failed: %s\n", kArchivePath);
         return false;
     }
 
     const char* tempPath = "/kds/orders_archive.tmp";
     File temp = LittleFS.open(tempPath, "w");
     if (!temp) {
-        Serial.printf("[ARCHIVE] 置換失敗: 一時ファイル作成不可 (%s)\n", tempPath);
+        Serial.printf("[E] archive replace temp failed: %s\n", tempPath);
         input.close();
         return false;
     }
@@ -754,7 +714,7 @@ bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t a
         DynamicJsonDocument doc(std::max<size_t>(estimateOrderDocumentCapacity(order) + 512, 8192));
         DeserializationError err = deserializeJson(doc, line);
         if (err) {
-            Serial.printf("[ARCHIVE] 置換: JSON解析失敗をスキップ (%s)\n", err.c_str());
+            Serial.printf("[E] archive replace parse failed: %s\n", err.c_str());
             temp.println(line);
             continue;
         }
@@ -787,7 +747,7 @@ bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t a
     input.close();
 
     if (!updated) {
-        Serial.printf("[ARCHIVE] 置換失敗: 対象注文が見つかりません (%s)\n", order.orderNo.c_str());
+        Serial.printf("[E] archive replace target missing: %s\n", order.orderNo.c_str());
         LittleFS.remove(tempPath);
         return false;
     }
@@ -798,31 +758,29 @@ bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t a
     }
 
     if (!LittleFS.rename(kArchivePath, backupPath)) {
-        Serial.printf("[ARCHIVE] 置換失敗: バックアップ作成不可 (%s)\n", backupPath.c_str());
+        Serial.printf("[E] archive replace backup failed: %s\n", backupPath.c_str());
         LittleFS.remove(tempPath);
         return false;
     }
 
     if (!LittleFS.rename(tempPath, kArchivePath)) {
-        Serial.printf("[ARCHIVE] 置換失敗: rename不可 (%s)\n", tempPath);
+        Serial.printf("[E] archive replace rename failed: %s\n", tempPath);
         LittleFS.rename(backupPath, kArchivePath);
         LittleFS.remove(tempPath);
         return false;
     }
 
     LittleFS.remove(backupPath);
-    Serial.printf("[ARCHIVE] 置換成功: order=%s session=%s\n", order.orderNo.c_str(), sessionId.c_str());
     return true;
 }
 
 bool snapshotSave() {
-    Serial.printf("=== snapshotSave開始: 注文数=%d, メニュー数=%d ===\n", 
-                  S().orders.size(), S().menu.size());
-    
     if (!ensureDataDir()) {
         return false;
     }
-    
+
+    Serial.println("[SNAPSHOT] start");
+
     size_t docCapacity = std::max<size_t>(estimateSnapshotCapacity(), 32 * 1024);
     DynamicJsonDocument doc(docCapacity);
     doc["settings"]["catalogVersion"] = S().settings.catalogVersion;
@@ -839,12 +797,12 @@ bool snapshotSave() {
     doc["settings"]["store"]["registerId"] = S().settings.store.registerId;
     doc["settings"]["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
     doc["settings"]["qrPrint"]["content"] = S().settings.qrPrint.content;
-    
+
     doc["session"]["sessionId"] = S().session.sessionId;
     doc["session"]["startedAt"] = S().session.startedAt;
     doc["session"]["exported"] = S().session.exported;
     doc["session"]["nextOrderSeq"] = S().session.nextOrderSeq;
-    
+
     doc["printer"]["paperOut"] = S().printer.paperOut;
     doc["printer"]["overheat"] = S().printer.overheat;
     doc["printer"]["holdJobs"] = S().printer.holdJobs;
@@ -862,43 +820,30 @@ bool snapshotSave() {
         menuItem["price_single"] = item.price_single;
         menuItem["price_as_side"] = item.price_as_side;
     }
-    
+
     JsonArray ordersArray = doc["orders"].to<JsonArray>();
     for (const auto& order : S().orders) {
         JsonObject orderObj = ordersArray.add<JsonObject>();
         orderToJson(orderObj, order);
-
-        Serial.printf("  注文 %s: status=%s, cooked=%d, picked_up=%d, pickup_called=%d, items=%d件\n",
-                      order.orderNo.c_str(), order.status.c_str(), 
-                      order.cooked, order.picked_up, order.pickup_called, order.items.size());
     }
-    
+
     String filename = pickSnapshotPathForWrite();
     File file = LittleFS.open(filename, "w");
     if (!file) {
-        Serial.printf("スナップショット保存失敗: %s\n", filename.c_str());
-        return false;
-    }
-    
-    size_t jsonSize = measureJson(doc);
-    Serial.printf("[SNAP] JSON size=%u (cap=%u)\n", static_cast<unsigned>(jsonSize), static_cast<unsigned>(doc.capacity()));
-    size_t written = serializeJson(doc, file);
-    file.flush();
-    file.close();
-    if (written == 0) {
-        Serial.printf("[SNAP] serialize failed: %s\n", filename.c_str());
+        Serial.printf("[E] snapshot open failed: %s\n", filename.c_str());
         return false;
     }
 
-    size_t fileSize = 0;
-    File verify = LittleFS.open(filename, "r");
-    if (verify) {
-        fileSize = verify.size();
-        verify.close();
+    size_t written = serializeJson(doc, file);
+    file.println();
+    file.flush();
+    file.close();
+    if (written == 0) {
+        Serial.printf("[E] snapshot write failed: %s\n", filename.c_str());
+        return false;
     }
-    Serial.printf("[SNAP] file size=%u bytes\n", static_cast<unsigned>(fileSize));
-    
-    Serial.printf("スナップショット保存完了: %s\n", filename.c_str());
+
+    Serial.printf("[SNAPSHOT] saved: %s\n", filename.c_str());
     return true;
 }
 
@@ -946,21 +891,20 @@ bool snapshotLoad() {
             return false;
         }
         size_t loadCapacity = computeSnapshotLoadCapacity(f.size());
-        Serial.printf("[SNAP] load candidate: %s (size=%u, cap=%u)\n", path, static_cast<unsigned>(f.size()), static_cast<unsigned>(loadCapacity));
         DynamicJsonDocument doc(loadCapacity);
         if (doc.capacity() == 0) {
-            Serial.printf("スナップショット用にメモリ確保失敗: %s (requested=%u)\n", path, static_cast<unsigned>(loadCapacity));
+            Serial.printf("[E] snapshot alloc failed: %s (%u bytes)\n", path, static_cast<unsigned>(loadCapacity));
             f.close();
             return false;
         }
         DeserializationError err = deserializeJson(doc, f);
         f.close();
         if (err) {
-            Serial.printf("スナップショット読込エラー: %s - %s\n", path, err.c_str());
+            Serial.printf("[E] snapshot parse failed: %s (%s)\n", path, err.c_str());
             return false;
         }
         if (!populateStateFromSnapshotDoc(doc, path)) {
-            Serial.printf("スナップショット内容不正: %s (root type=%s)\n", path, doc.is<JsonObject>() ? "object" : "non-object");
+            Serial.printf("[E] snapshot invalid: %s\n", path);
             return false;
         }
         return true;
@@ -970,12 +914,10 @@ bool snapshotLoad() {
         return true;
     }
 
-    Serial.printf("[SNAP] 新しいスナップショット読み込み失敗、古い方を試行: %s\n", newer ? newer : "(none)");
     if (tryLoad(older)) {
         return true;
     }
 
-    Serial.println("[SNAP] スナップショットが復元できないため初期データに切替");
     ensureInitialMenu();
     return false;
 }
@@ -983,7 +925,7 @@ bool snapshotLoad() {
 static bool populateStateFromSnapshotDoc(const JsonDocument& doc, const char* sourceLabel) {
     JsonObjectConst root = doc.as<JsonObjectConst>();
     if (!root) {
-        Serial.printf("[SNAP] root not object: %s\n", sourceLabel);
+        Serial.printf("[E] snapshot root invalid: %s\n", sourceLabel);
         return false;
     }
 
@@ -1078,22 +1020,12 @@ static bool populateStateFromSnapshotDoc(const JsonDocument& doc, const char* so
                 }
             }
 
-            Serial.printf("  復元: 注文 %s: status=%s, cooked=%d, picked_up=%d, pickup_called=%d, items=%d件\n",
-                          order.orderNo.c_str(), order.status.c_str(),
-                          order.cooked, order.picked_up, order.pickup_called, order.items.size());
-
             S().orders.push_back(order);
         }
     }
 
-    Serial.printf("スナップショット読込完了: %s\n", sourceLabel);
-    Serial.printf("復元されたデータ: 注文数=%d件, メニュー数=%d件\n", S().orders.size(), S().menu.size());
-
     if (S().menu.empty()) {
-        Serial.println("スナップショットにメニューが含まれていないため、初期メニューを投入");
         ensureInitialMenu();
-    } else {
-        Serial.printf("スナップショットからメニュー復元: %d件\n", S().menu.size());
     }
 
     return true;
@@ -1182,17 +1114,17 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             continue;
         }
 
-    DynamicJsonDocument doc(8192);
+        DynamicJsonDocument doc(8192);
         DeserializationError error = deserializeJson(doc, line);
         if (error) {
-            Serial.printf("[RECOVER] JSON解析エラー、スキップ (%s): %s\n", sourceLabel.c_str(), line.c_str());
+            Serial.printf("[E] wal parse failed (%s): %s\n", sourceLabel.c_str(), error.c_str());
             continue;
         }
 
         uint32_t ts = doc["ts"] | 0;
         String action = doc["action"] | doc["type"] | "";
         if (action.isEmpty()) {
-            Serial.printf("[RECOVER] action不明、スキップ (%s): %s\n", sourceLabel.c_str(), line.c_str());
+            Serial.printf("[E] wal missing action (%s)\n", sourceLabel.c_str());
             continue;
         }
 
@@ -1238,7 +1170,7 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             }
 
             if (!parsed) {
-                Serial.printf("[RECOVER] ORDER_CREATE スキップ: order payload missing body (%s)\n", sourceLabel.c_str());
+                Serial.printf("[E] wal create payload missing (%s)\n", sourceLabel.c_str());
                 continue;
             }
 
@@ -1248,7 +1180,6 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             } else {
                 S().orders.push_back(restored);
             }
-            Serial.printf("[RECOVER] ORDER_CREATE (%s): %s (items=%d件)\n", sourceLabel.c_str(), restored.orderNo.c_str(), restored.items.size());
             appliedEntry = true;
 
         } else if (action == "ORDER_UPDATE") {
@@ -1262,7 +1193,6 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                     if (doc["pickup_called"].is<bool>()) target->pickup_called = doc["pickup_called"];
                     if (doc["picked_up"].is<bool>()) target->picked_up = doc["picked_up"];
                     if (doc["printed"].is<bool>()) target->printed = doc["printed"];
-                    Serial.printf("[RECOVER] ORDER_UPDATE (%s): %s (status=%s)\n", sourceLabel.c_str(), orderNo.c_str(), status.c_str());
                     appliedEntry = true;
                 }
             }
@@ -1276,7 +1206,6 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                 target->cooked = false;
                 target->pickup_called = false;
                 target->picked_up = false;
-                Serial.printf("[RECOVER] ORDER_CANCEL (%s): %s (reason=%s)\n", sourceLabel.c_str(), orderNo.c_str(), target->cancelReason.c_str());
                 appliedEntry = true;
             }
 
@@ -1286,7 +1215,6 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             if (target) {
                 target->cooked = true;
                 target->pickup_called = true;
-                Serial.printf("[RECOVER] ORDER_COOKED (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
                 appliedEntry = true;
             }
 
@@ -1296,14 +1224,13 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             if (target) {
                 target->picked_up = true;
                 target->pickup_called = false;
-                Serial.printf("[RECOVER] ORDER_PICKED (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
                 appliedEntry = true;
             }
 
         } else if (action == "ORDER_ARCHIVE") {
             String orderNo = doc["orderNo"] | "";
             if (orderNo.isEmpty()) {
-                Serial.printf("[RECOVER] ORDER_ARCHIVE orderNo欠落 (%s)\n", sourceLabel.c_str());
+                Serial.printf("[E] wal archive missing orderNo (%s)\n", sourceLabel.c_str());
                 continue;
             }
 
@@ -1324,18 +1251,14 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
             }
 
             if (!hasPayload) {
-                Serial.printf("[RECOVER] ORDER_ARCHIVE payload欠落 (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
+                Serial.printf("[E] wal archive missing payload (%s)\n", sourceLabel.c_str());
                 continue;
             }
 
             if (target) {
                 archiveOrderAndRemove(orderNo, sessionId, archivedAt, false);
-                Serial.printf("[RECOVER] ORDER_ARCHIVE remove (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
             } else if (!archiveOrderExists(sessionId, orderNo)) {
                 archiveAppend(payload, sessionId, archivedAt);
-                Serial.printf("[RECOVER] ORDER_ARCHIVE append only (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
-            } else {
-                Serial.printf("[RECOVER] ORDER_ARCHIVE skip duplicate (%s): %s\n", sourceLabel.c_str(), orderNo.c_str());
             }
             appliedEntry = true;
 
@@ -1353,7 +1276,6 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                 S().settings.store.nameRomaji = doc["store"]["nameRomaji"] | S().settings.store.nameRomaji;
                 S().settings.store.registerId = doc["store"]["registerId"] | S().settings.store.registerId;
             }
-            Serial.printf("[RECOVER] SETTINGS_UPDATE (%s)\n", sourceLabel.c_str());
             appliedEntry = true;
 
         } else if (action == "MAIN_UPSERT" || action == "SIDE_UPSERT") {
@@ -1378,7 +1300,6 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                         existing->price_single = doc["price_single"] | existing->price_single;
                         existing->price_as_side = doc["price_as_side"] | existing->price_as_side;
                     }
-                    Serial.printf("[RECOVER] %s (update, %s): %s\n", action.c_str(), sourceLabel.c_str(), sku.c_str());
                 } else {
                     MenuItem newItem;
                     newItem.sku = sku;
@@ -1394,7 +1315,6 @@ static void applyWalEntriesFromStream(File& walFile, const String& sourceLabel, 
                         newItem.price_as_side = doc["price_as_side"] | 0;
                     }
                     S().menu.push_back(newItem);
-                    Serial.printf("[RECOVER] %s (insert, %s): %s\n", action.c_str(), sourceLabel.c_str(), sku.c_str());
                 }
                 appliedEntry = true;
             }
@@ -1413,48 +1333,40 @@ bool walAppend(const String& line) {
     
     const char* walPath = "/kds/wal.log";
 
-    File file;
-    if (LittleFS.exists(walPath)) {
-        file = LittleFS.open(walPath, FILE_APPEND);
-        if (!file) {
-            Serial.printf("[WAL] FILE_APPEND失敗: %s\n", walPath);
+    if (!LittleFS.exists(walPath)) {
+        File create = LittleFS.open(walPath, FILE_WRITE);
+        if (!create) {
+            Serial.printf("[E] wal create failed: %s\n", walPath);
             return false;
         }
-    } else {
-        file = LittleFS.open(walPath, FILE_WRITE);
-        if (!file) {
-            Serial.printf("[WAL] ファイル作成失敗: %s\n", walPath);
-            return false;
-        }
+        create.close();
     }
-    
-    // JSON形式で書き込み: 1行 = 1 JSON
-    file.println(line);
+
+    File file = LittleFS.open(walPath, FILE_APPEND);
+    if (!file) {
+        Serial.printf("[E] wal append open failed: %s\n", walPath);
+        return false;
+    }
+
+    size_t written = file.println(line);
     file.flush();
     file.close();
-    
-    Serial.printf("[WAL] 追記成功: %s\n", line.c_str());
+    if (written == 0) {
+        Serial.println("[E] wal append write failed");
+        return false;
+    }
     return true;
 }
 
 bool recoverToLatest(String &outLastTs) {
-    Serial.println("=== recoverToLatest開始 ===");
-    
-    // 1. スナップショットを読み込む
-    Serial.println("[RECOVER] スナップショット読み込み中...");
     if (!snapshotLoad()) {
         outLastTs = "snapshot load failed";
-        Serial.println("[RECOVER] エラー: スナップショット読み込み失敗");
+        Serial.println("[E] recover snapshot load failed");
         return false;
     }
-    
-    Serial.printf("[RECOVER] スナップショット読み込み成功: 注文数=%d, メニュー数=%d\n", 
-                  S().orders.size(), S().menu.size());
-    
-    // 2. WALログを読み込んで適用
+
     std::vector<String> walFiles = listWalFilesForRecovery();
     if (walFiles.empty()) {
-        Serial.println("[RECOVER] WALファイルなし、スナップショットのみで復元完了");
         outLastTs = "snapshot only";
         return true;
     }
@@ -1465,10 +1377,9 @@ bool recoverToLatest(String &outLastTs) {
     for (const String& walPath : walFiles) {
         File walFile = LittleFS.open(walPath, "r");
         if (!walFile) {
-            Serial.printf("[RECOVER] WALファイルオープン失敗: %s\n", walPath.c_str());
+            Serial.printf("[E] recover wal open failed: %s\n", walPath.c_str());
             continue;
         }
-        Serial.printf("[RECOVER] WAL適用開始: %s\n", walPath.c_str());
         applyWalEntriesFromStream(walFile, walPath, lastTimestamp, entriesApplied);
         walFile.close();
     }
@@ -1486,33 +1397,18 @@ bool recoverToLatest(String &outLastTs) {
     } else {
         outLastTs = "no WAL entries";
     }
-    
-    Serial.printf("[RECOVER] wal apply: %d entries (lastTs=%s)\n", entriesApplied, outLastTs.c_str());
-    Serial.printf("[RECOVER] 復元完了: 注文数=%d, メニュー数=%d\n", S().orders.size(), S().menu.size());
 
     if (!recalculateSalesSummary()) {
-        Serial.println("[RECOVER] 警告: 売上サマリの再計算に失敗しました");
+        Serial.println("[E] recover sales summary failed");
     }
     
+    Serial.println("[RECOVER] ok");
     return true;
 }
 
 void forceCreateInitialMenu() {
-    Serial.println("=== 初期メニュー強制作成開始 ===");
-    int previousCount = S().menu.size();
-    Serial.printf("作成前メニュー数: %d\n", previousCount);
-    
     S().menu.clear();
-    Serial.println("メニューをクリアしました");
-    
     createInitialMenuItems();
-    
-    Serial.printf("初期メニュー強制作成完了: %d件\n", S().menu.size());
-    
-    for (int i = 0; i < S().menu.size(); i++) {
-        Serial.printf("作成[%d]: %s (%s) - %s\n", 
-                     i, S().menu[i].sku.c_str(), S().menu[i].name.c_str(), S().menu[i].category.c_str());
-    }
 }
 
 void createInitialMenuItems() {
@@ -1587,36 +1483,13 @@ void createInitialMenuItems() {
     potato.price_as_side = 150;
     S().menu.push_back(potato);
     
-    Serial.printf("初期メニュー投入完了: %d件\n", S().menu.size());
-    
-    Serial.println("=== 初期メニュー詳細 ===");
-    for (int i = 0; i < S().menu.size(); i++) {
-        const auto& item = S().menu[i];
-        Serial.printf("メニュー%d: %s (%s) - SKU:%s\n", 
-                     i+1, item.name.c_str(), item.category.c_str(), item.sku.c_str());
-        if (item.category == "MAIN") {
-            Serial.printf("  通常価格:%d円, 前売割引:%d円\n", 
-                         item.price_normal, item.presale_discount_amount);
-        } else {
-            Serial.printf("  単品:%d円, セット:%d円\n", 
-                         item.price_single, item.price_as_side);
-        }
-    }
 }
 
 void ensureInitialMenu() {
     if (!S().menu.empty()) {
-        Serial.printf("初期メニュー確認: 既存メニュー数 %d\n", S().menu.size());
-        for (int i = 0; i < S().menu.size(); i++) {
-            Serial.printf("  [%d] %s (%s) - %s\n", 
-                         i, S().menu[i].sku.c_str(), S().menu[i].name.c_str(), S().menu[i].category.c_str());
-        }
         return;
     }
-    
-    Serial.println("初期メニューを投入中...");
     createInitialMenuItems();
-    
     snapshotSave();
 }
 

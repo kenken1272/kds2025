@@ -273,7 +273,7 @@ static void processCancelRequest(AsyncWebServerRequest *request, const uint8_t *
   walAppend(walLine);
 
   if (requireSnapshot) {
-    snapshotSave();
+      requestSnapshotSave();
   }
 
   JsonDocument notify;
@@ -309,7 +309,14 @@ void initHttpRoutes(AsyncWebServer &server) {
   });
 
   server.on("/api/state", HTTP_GET, [](AsyncWebServerRequest *request) {
-    JsonDocument doc;
+    bool light = request->hasParam("light") && request->getParam("light")->value() == "1";
+    size_t menuCount = S().menu.size();
+    size_t orderCount = S().orders.size();
+    if (light && orderCount > 60) {
+      orderCount = 60;
+    }
+    size_t docCapacity = 8192 + menuCount * 384 + orderCount * 768;
+    DynamicJsonDocument doc(docCapacity);
     doc["settings"]["catalogVersion"] = S().settings.catalogVersion;
     doc["settings"]["chinchiro"]["enabled"] = S().settings.chinchiro.enabled;
     JsonArray mult = doc["settings"]["chinchiro"]["multipliers"].to<JsonArray>();
@@ -347,9 +354,18 @@ void initHttpRoutes(AsyncWebServer &server) {
     }
 
     JsonArray ordersArray = doc["orders"].to<JsonArray>();
-    for (const auto& od : S().orders) {
-      JsonObject o = ordersArray.add<JsonObject>();
-      fillOrderJson(o, od);
+    if (light) {
+      size_t total = S().orders.size();
+      size_t start = (total > 60) ? total - 60 : 0;
+      for (size_t idx = start; idx < total; ++idx) {
+        JsonObject o = ordersArray.add<JsonObject>();
+        fillOrderJson(o, S().orders[idx]);
+      }
+    } else {
+      for (const auto& od : S().orders) {
+        JsonObject o = ordersArray.add<JsonObject>();
+        fillOrderJson(o, od);
+      }
     }
 
     String res; serializeJson(doc, res);
@@ -410,7 +426,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         String walLine; serializeJson(walDoc, walLine);
         walAppend(walLine);
       }
-      snapshotSave();
+      requestSnapshotSave();
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
@@ -468,7 +484,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         String walLine; serializeJson(walDoc, walLine);
         walAppend(walLine);
       }
-      snapshotSave();
+    requestSnapshotSave();
       request->send(200, "application/json", "{\"ok\":true}");
     });
 
@@ -500,7 +516,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       String walLine; serializeJson(walDoc, walLine);
       walAppend(walLine);
       
-      snapshotSave();
+    requestSnapshotSave();
 
       JsonDocument sync; sync["type"] = "sync.snapshot";
       String msg; serializeJson(sync, msg); wsBroadcast(msg);
@@ -532,7 +548,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       String walLine; serializeJson(walDoc, walLine);
       walAppend(walLine);
       
-      snapshotSave();
+    requestSnapshotSave();
 
       JsonDocument sync; sync["type"] = "sync.snapshot";
       String msg; serializeJson(sync, msg); wsBroadcast(msg);
@@ -702,7 +718,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         }
       }
       
-      snapshotSave();
+    requestSnapshotSave();
 
       JsonDocument notify; notify["type"]="order.updated"; notify["orderNo"]=orderNo; notify["status"]=newStatus;
       String msg; serializeJson(notify, msg); wsBroadcast(msg);
@@ -1092,7 +1108,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         updatedOrder = nullptr;
       }
       
-      snapshotSave();
+    requestSnapshotSave();
 
       JsonDocument notify; 
       notify["type"] = notifyType;
@@ -1141,7 +1157,7 @@ void initHttpRoutes(AsyncWebServer &server) {
     String walLine; serializeJson(walDoc, walLine);
     walAppend(walLine);
     
-    snapshotSave();
+    requestSnapshotSave();
     
     JsonDocument notify;
     notify["type"] = "order.cooked";
@@ -1194,7 +1210,7 @@ void initHttpRoutes(AsyncWebServer &server) {
       return;
     }
     
-    snapshotSave();
+    requestSnapshotSave();
     
     JsonDocument notify;
     notify["type"] = "order.picked";
@@ -1263,7 +1279,7 @@ void initHttpRoutes(AsyncWebServer &server) {
         if (doc["numbering"]["max"].is<int>()) S().settings.numbering.max = doc["numbering"]["max"].as<uint16_t>();
       }
 
-      snapshotSave();
+      requestSnapshotSave();
       Serial.println("システム設定を保存しました");
       request->send(200, "application/json", "{\"ok\":true}");
     });
@@ -1283,8 +1299,8 @@ void initHttpRoutes(AsyncWebServer &server) {
     S().printer.overheat = false;
     S().printer.holdJobs = 0;
 
-    snapshotSave();
-    
+    requestSnapshotSave();
+
     // WAL記録（JSON形式）
   StaticJsonDocument<512> walDoc;
     walDoc["ts"] = (uint32_t)time(nullptr);

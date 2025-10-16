@@ -2,31 +2,26 @@
 #include <M5Unified.h>
 #include <time.h>
 
-static void _hexDump(const uint8_t* p, size_t n, const char* tag) {
-  if (!p || n==0) { Serial.printf("[PRINT][DUMP] %s len=0 (null)\n", tag?tag:"?"); return; }
-  Serial.printf("[PRINT][DUMP] %s len=%u : ", tag?tag:"?", (unsigned)n);
-  for (size_t i=0;i<n;i++) {
-    Serial.printf("%02X ", p[i]);
-    if ((i+1)%16==0) Serial.print(" ");
-  }
-  Serial.println();
-}
-
-static void _sendBytesDebug(HardwareSerial* ser, const uint8_t* p, size_t n, const char* tag){
-  if (!ser) return; _hexDump(p,n,tag); size_t w = ser->write(p,n); ser->flush(); Serial.printf("[PRINT][SEND](debug) %s wrote %u/%u bytes\n", tag?tag:"?", (unsigned)w,(unsigned)n); delay(10); }
-
 static bool _sendBytesChecked(HardwareSerial* ser, const uint8_t* p, size_t n, const char* tag) {
   if (!ser || !p || !n) return false;
   size_t w = ser->write(p, n);
   ser->flush();
-  Serial.printf("[PRINT][SEND] %s wrote %u/%u bytes\n", tag?tag:"?", (unsigned)w, (unsigned)n);
-  delay(10);
-  return (w == n);
+  if (w != n) {
+    Serial.printf("[E] printer write short: %s\n", tag ? tag : "?");
+    return false;
+  }
+  return true;
 }
 
 static void _sendLineASCII(HardwareSerial* ser, const String& s){
-  if (!ser) return; String t = s; for (int i=0;i<t.length();++i){ char c=t[i]; if (c<0x20||c>0x7E) t.setCharAt(i,'?'); }
-  Serial.printf("[PRINT][ASCII] \"%s\" (len=%d)\n", t.c_str(), t.length());
+  if (!ser) return;
+  String t = s;
+  for (int i = 0; i < t.length(); ++i) {
+    char c = t[i];
+    if (c < 0x20 || c > 0x7E) {
+      t.setCharAt(i, '?');
+    }
+  }
   ser->write((const uint8_t*)t.c_str(), t.length());
   ser->write((const uint8_t*)"\n",1);
   ser->flush();
@@ -43,13 +38,12 @@ PrinterRenderer::~PrinterRenderer() { cleanup(); }
 bool PrinterRenderer::initialize(HardwareSerial* serial) {
   printerSerial_ = serial;
   if (!printerSerial_) {
-    Serial.println("[PRINT] Error: Invalid printer serial");
+    Serial.println("[E] printer serial invalid");
     return false;
   }
   baud_  = 115200;
   printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
   ready_ = true;
-  Serial.printf("[PRINT] PrinterRenderer initialized (115200bps, RX=%d, TX=%d)\n", PRN_RX, PRN_TX);
   return true;
 }
 
@@ -62,11 +56,10 @@ bool PrinterRenderer::isReady() const { return ready_ && printerSerial_ != nullp
 
 void PrinterRenderer::printerInit() {
   if (!isReady()) {
-    Serial.println("[PRINT] Error: printer serial not ready");
+    Serial.println("[E] printer not ready");
     return;
   }
 
-  Serial.printf("[PRINT] ATOM Printer init @ %dbps (ESP32 RX=%d, TX=%d)\n", baud_, PRN_RX, PRN_TX);
   printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
 
   delay(200);
@@ -78,21 +71,25 @@ void PrinterRenderer::printerInit() {
   const uint8_t ESC_T_437[]  = {0x1B, 0x74, 0x00};
   const uint8_t ESC_3_LS[]   = {0x1B, 0x33, (uint8_t)LINE_SPACING};
 
-  _sendBytesChecked(printerSerial_, ESC_AT,    sizeof(ESC_AT),    "ESC @ (reset)");
-  _sendBytesChecked(printerSerial_, ESC_R_USA, sizeof(ESC_R_USA), "ESC R 0 (USA)");
-  _sendBytesChecked(printerSerial_, ESC_T_437, sizeof(ESC_T_437), "ESC t 0 (PC437)");
-  _sendBytesChecked(printerSerial_, ESC_3_LS,  sizeof(ESC_3_LS),  "ESC 3 line spacing");
+  bool ok = true;
+  ok &= _sendBytesChecked(printerSerial_, ESC_AT,    sizeof(ESC_AT),    "ESC @");
+  ok &= _sendBytesChecked(printerSerial_, ESC_R_USA, sizeof(ESC_R_USA), "ESC R");
+  ok &= _sendBytesChecked(printerSerial_, ESC_T_437, sizeof(ESC_T_437), "ESC t");
+  ok &= _sendBytesChecked(printerSerial_, ESC_3_LS,  sizeof(ESC_3_LS),  "ESC 3");
 
-  Serial.println("[PRINT] Initialization completed");
+  if (ok) {
+    Serial.println("[PRINT] init ok");
+  } else {
+    Serial.println("[E] printer init failed");
+  }
 }
 
 void PrinterRenderer::updateBaudRate(int baudRate) {
   if (!printerSerial_) {
-    Serial.println("[PRINT] Error: Serial not initialized");
+    Serial.println("[E] printer not initialized");
     return;
   }
   baud_ = baudRate;
-  Serial.printf("[PRINT] Update baud -> %d\n", baud_);
   printerSerial_->end();
   delay(80);
   printerSerial_->begin(baud_, SERIAL_8N1, PRN_RX, PRN_TX);
@@ -116,7 +113,6 @@ void PrinterRenderer::sendCutCommand() {
   sendFeedLines(4);
   const uint8_t cut[] = {0x1D, 0x56, 0x42, 0x00};
   _sendBytesChecked(printerSerial_, cut, sizeof(cut), "GS V B 0");
-  Serial.println("[PRINT] Cut command issued");
 }
 
 String PrinterRenderer::toASCII(const String& s) {
@@ -191,8 +187,6 @@ bool PrinterRenderer::sendSpriteAsRaster(M5Canvas& sp) {
   const int widthBytes = (DOT_WIDTH + 7) / 8;
   const int h          = sp.height();
 
-  Serial.printf("[PRINT] Raster send %d x %d (bytes/row=%d)\n", DOT_WIDTH, h, widthBytes);
-
   for (int y = 0; y < h; y += RASTER_HEIGHT) {
     const int bandH = min(RASTER_HEIGHT, h - y);
     auto band = buildMonoBand(sp, y, bandH);
@@ -234,7 +228,6 @@ bool PrinterRenderer::printSelfCheck() {
   canvas.deleteSprite();
 
   if (ok) { sendFeedLines(3); sendCutCommand(); }
-  Serial.printf("[PRINT] Self-check: %s\n", ok ? "OK" : "NG");
   return ok;
 }
 
@@ -658,30 +651,27 @@ bool PrinterRenderer::printReceiptEN(const Order& order) {
 }
 bool PrinterRenderer::printQRCode(const String& content) {
   if (!isReady()) {
-    Serial.println("[PRINT] QR NG: not initialized");
+    Serial.println("[E] printer not ready");
     return false;
   }
   
   if (content.length() == 0) {
-    Serial.println("[PRINT] QR: empty content, skip");
     return true;
   }
-  
-  Serial.printf("[PRINT] QR: printing \"%s\" (len=%d)\n", content.c_str(), content.length());
-  
+
   const uint8_t setModel[] = {0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00};
-  _sendBytesChecked(printerSerial_, setModel, sizeof(setModel), "QR Model");
-  
-  const uint8_t setSize[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, 0x05};
-  _sendBytesChecked(printerSerial_, setSize, sizeof(setSize), "QR Size");
-  
-  const uint8_t setECC[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, 0x31};
-  _sendBytesChecked(printerSerial_, setECC, sizeof(setECC), "QR ECC");
-  
+  const uint8_t setSize[]  = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, 0x05};
+  const uint8_t setECC[]   = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, 0x31};
+
+  bool ok = true;
+  ok &= _sendBytesChecked(printerSerial_, setModel, sizeof(setModel), "QR Model");
+  ok &= _sendBytesChecked(printerSerial_, setSize, sizeof(setSize), "QR Size");
+  ok &= _sendBytesChecked(printerSerial_, setECC, sizeof(setECC), "QR ECC");
+
   int dataLen = content.length() + 3;
   uint8_t pL = dataLen & 0xFF;
   uint8_t pH = (dataLen >> 8) & 0xFF;
-  
+
   printerSerial_->write(0x1D);
   printerSerial_->write(0x28);
   printerSerial_->write(0x6B);
@@ -692,21 +682,17 @@ bool PrinterRenderer::printQRCode(const String& content) {
   printerSerial_->write(0x30);
   printerSerial_->write((const uint8_t*)content.c_str(), content.length());
   printerSerial_->flush();
-  Serial.printf("[PRINT][SEND] QR Data wrote %d bytes\n", content.length() + 8);
   delay(50);
-  
+
   const uint8_t printQR[] = {0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30};
-  _sendBytesChecked(printerSerial_, printQR, sizeof(printQR), "QR Print");
-  
+  ok &= _sendBytesChecked(printerSerial_, printQR, sizeof(printQR), "QR Print");
+
   delay(100);
-  
-  Serial.println("[PRINT] QR: print command sent");
-  return true;
+
+  return ok;
 }
 bool PrinterRenderer::printHelloWorldTest() {
-  if (!isReady()) { Serial.println("[PRINT] NG: not initialized"); return false; }
-  Serial.println("========== HELLO TEST START ==========");
-  Serial.printf("[PRINT] UART: %d bps (ESP32 RX=%d, TX=%d)\n", baud_, PRN_RX, PRN_TX);
+  if (!isReady()) { Serial.println("[E] printer not ready"); return false; }
   printerInit();
   bool any=false;
   auto sendAscii=[&](const char* s){ String line=String(s)+"\n"; bool ok=_sendBytesChecked(printerSerial_, (const uint8_t*)line.c_str(), line.length(), "HELLO"); any = any || ok; };
@@ -716,6 +702,5 @@ bool PrinterRenderer::printHelloWorldTest() {
   sendAscii("If you can read this, UART OK.");
   sendFeedLines(4);
   sendCutCommand();
-  Serial.println("=========== HELLO TEST END ===========");
   return any;
 }

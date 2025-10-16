@@ -23,6 +23,21 @@ const state = {
     }
 };
 
+let _reloadTimer = null;
+function scheduleStateReload() {
+    if (_reloadTimer) {
+        return;
+    }
+    _reloadTimer = setTimeout(async () => {
+        _reloadTimer = null;
+        try {
+            await loadStateData();
+        } catch (error) {
+            console.error('状態再取得スケジュール失敗:', error);
+        }
+    }, 400);
+}
+
 function getOrderFromState(orderNo) {
     if (!orderNo) {
         return null;
@@ -136,18 +151,35 @@ function updateCurrentTime() {
         });
     }
 }
-async function loadStateData() {
+async function loadStateData(options = {}) {
+    const { forceFull = false } = options;
     try {
-        const response = await fetch('/api/state');
-        state.data = await response.json();
-        console.log('状態データ取得完了:', state.data);
-        const forceSalesReload = state.settingsTab === 'sales';
-        const sessionId = state.data && state.data.session ? state.data.session.sessionId : null;
-        if (sessionId) {
-            await loadArchivedOrders(sessionId, forceSalesReload);
+        const preferLight = !forceFull && state.data !== null;
+        const url = preferLight ? '/api/state?light=1' : '/api/state';
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
         }
-        ensureSalesSummary(forceSalesReload);
-        render(); 
+
+        const previousMenu = state.data && Array.isArray(state.data.menu) ? state.data.menu : null;
+        const payload = await response.json();
+        state.data = payload;
+        if (preferLight && previousMenu && (!Array.isArray(state.data.menu) || state.data.menu.length === 0)) {
+            state.data.menu = previousMenu;
+        }
+
+        console.log('状態データ取得完了:', state.data);
+
+        const needsSalesData = state.settingsTab === 'sales';
+        const sessionId = state.data?.session?.sessionId || null;
+        if (needsSalesData && sessionId) {
+            await loadArchivedOrders(sessionId, true);
+            ensureSalesSummary(true);
+        } else {
+            ensureSalesSummary(false);
+        }
+
+        render();
         updateConfirmOrderButton();
     } catch (error) {
         console.error('状態データ取得エラー:', error);
@@ -384,9 +416,9 @@ function connectWs() {
             if (data.type === 'hello') {
                 console.log('サーバーから挨拶:', data.msg);
             } else if (data.type === 'sync.snapshot') {
-                loadStateData();
+                scheduleStateReload();
             } else if (data.type === 'order.created' || data.type === 'order.updated') {
-                loadStateData();
+                scheduleStateReload();
             } else if (data.type === 'printer.status') {
                 if (state.data) {
                     state.data.printer.paperOut = data.paperOut !== undefined ? data.paperOut : state.data.printer.paperOut;
@@ -403,7 +435,7 @@ function connectWs() {
                 if (state.page === 'call') {
                     updateCallScreen();
                 } else {
-                    loadStateData(); 
+                    scheduleStateReload();
                 }
             } else if (data.type === 'order.picked') {
                 const beforeLength = state.callList.length;
@@ -414,7 +446,7 @@ function connectWs() {
                 if (state.page === 'call') {
                     updateCallScreen();
                 } else {
-                    loadStateData(); 
+                    scheduleStateReload();
                 }
             }
             
@@ -2311,7 +2343,7 @@ function showSessionEndDialog() {
         <div class="modal-content session-dialog">
             <h2>営業データのエクスポートが完了しました</h2>
             <p>今後の営業をどうしますか？</p>
-            <p class="session-note">📶 売上確認ツールにアップロードする場合は、先に端末のWi-Fiをアップロード用ネットワークへ切り替えてください。</p>
+            <p class="session-note">📶 「売上確認画面を開く」を押すとKDSのソフトAPが60秒停止します。アップロード後は自動で再開します。</p>
             <div class="session-options">
                 <button class="btn btn-success btn-large" onclick="continueSession()">
                     🔄 営業を続ける
@@ -2319,8 +2351,7 @@ function showSessionEndDialog() {
                 </button>
                 <button class="btn btn-primary btn-large" onclick="openSalesSummaryUploader()">
                     📤 売上確認画面を開く
-                    <small>Wi-Fi切替後にタップ（外部サイト）</small>
-                    <small style="display:block; margin-top:4px;">※ 押下後はAPが停止し、1分後に自動で再開します</small>
+                    <small>タップするとAPが60秒停止（外部サイト）</small>
                 </button>
                 <button class="btn btn-warning btn-large" onclick="confirmEndSession()">
                     🏁 営業セッション終了
@@ -2812,7 +2843,12 @@ function closeSessionDialog() {
 }
 
 async function openSalesSummaryUploader() {
-    if (!confirm('OKを押すと外部サイトが開きます')) {
+    const confirmed = confirm(
+        '📤 売上確認ツールを開くと、KDSのソフトAPが60秒間停止します。\n' +
+        'この間、タブレットは一時的に切断されます。続行しますか？'
+    );
+
+    if (!confirmed) {
         return;
     }
 
@@ -2825,17 +2861,19 @@ async function openSalesSummaryUploader() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ resumeAfter: 60 })
         });
+
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
+
         const result = await response.json();
-        console.log('[openSalesSummaryUploader] AP suspend result:', result);
+        console.log('[openSalesSummaryUploader] AP suspend requested:', result);
     } catch (error) {
-        console.error('[openSalesSummaryUploader] AP suspend failed:', error);
+        console.error('[openSalesSummaryUploader] Failed to suspend AP:', error);
         if (popup && !popup.closed) {
             popup.close();
         }
-        alert(`APモードの停止に失敗しました。\n${error.message}`);
+        alert('⚠️ ソフトAPの一時停止に失敗しました。ネットワークを確認してから再度お試しください。');
         return;
     }
 
@@ -2847,5 +2885,5 @@ async function openSalesSummaryUploader() {
         window.open(uploadUrl, '_blank');
     }
 
-    alert('APモードを一時停止しました。1分後に自動で再開します。\nWi-Fiをアップロード用ネットワークに切り替えてください。');
+    alert('売上確認ツールを新しいタブで開きました。タブレットは60秒後に自動でKDS Wi-Fiへ再接続します。');
 }

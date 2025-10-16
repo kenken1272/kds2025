@@ -121,6 +121,8 @@ bool archiveReplaceOrder(const Order& order, const String& sessionId, uint32_t a
 
 bool snapshotSave();
 bool snapshotLoad();
+void requestSnapshotSave();
+bool consumeSnapshotSaveRequest();
 bool walAppend(const String& line);
 bool recoverToLatest(String &outLastTs);
 bool getLatestSnapshotJson(String& outJson, String& outPath);
