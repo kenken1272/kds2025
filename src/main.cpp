@@ -24,6 +24,94 @@ const char* ntp_server3 = "pool.ntp.org";
 
 AsyncWebServer server(80);
 
+static bool g_apEnabled = false;
+static bool g_apResumeScheduled = false;
+static uint32_t g_apResumeAtMs = 0;
+static bool g_apDisablePending = false;
+static uint32_t g_apDisableResumeDelayMs = 0;
+
+static void scheduleApDisable(uint32_t resumeDelayMs) {
+    g_apDisableResumeDelayMs = resumeDelayMs;
+    g_apDisablePending = true;
+}
+
+static bool enableAccessPoint();
+
+static void pollAccessPointResume() {
+    if (!g_apResumeScheduled) {
+        return;
+    }
+
+    uint32_t now = millis();
+    if (static_cast<int32_t>(now - g_apResumeAtMs) >= 0) {
+        Serial.println("[WIFI] AP resume timer fired");
+        if (enableAccessPoint()) {
+            Serial.println("[WIFI] AP resumed");
+            g_apResumeScheduled = false;
+        } else {
+            Serial.println("[WIFI] AP resume failed, retrying in 5s");
+            g_apResumeAtMs = now + 5000;
+        }
+    }
+}
+
+bool disableAccessPointFor(uint32_t resumeDelayMs) {
+    Serial.println("[WIFI] Disabling access point");
+    WiFi.softAPdisconnect(true);
+    WiFi.enableAP(false);
+    wifi_mode_t current = WiFi.getMode();
+    if (current == WIFI_MODE_AP) {
+        WiFi.mode(WIFI_MODE_NULL);
+    } else if (current == WIFI_MODE_APSTA) {
+        WiFi.mode(WIFI_MODE_STA);
+    }
+    g_apEnabled = false;
+
+    if (resumeDelayMs > 0) {
+        g_apResumeScheduled = true;
+        g_apResumeAtMs = millis() + resumeDelayMs;
+    } else {
+        g_apResumeScheduled = false;
+    }
+
+    return true;
+}
+
+static void processPendingAccessPointTasks() {
+    if (g_apDisablePending) {
+        g_apDisablePending = false;
+        disableAccessPointFor(g_apDisableResumeDelayMs);
+    }
+    pollAccessPointResume();
+}
+
+bool enableAccessPoint() {
+    wifi_mode_t desired = WiFi.isConnected() ? WIFI_MODE_APSTA : WIFI_MODE_AP;
+    WiFi.mode(desired);
+    WiFi.enableAP(true);
+    bool ok = WiFi.softAP(ap_ssid, ap_password);
+    if (ok) {
+        g_apEnabled = true;
+    }
+    return ok;
+}
+
+bool isAccessPointEnabled() {
+    return g_apEnabled;
+}
+
+bool isAccessPointResumeScheduled() {
+    return g_apResumeScheduled;
+}
+
+uint32_t getAccessPointResumeEtaMs() {
+    return g_apResumeScheduled ? g_apResumeAtMs : 0;
+}
+
+void requestAccessPointSuspend(uint32_t resumeDelayMs) {
+    scheduleApDisable(resumeDelayMs);
+}
+
 bool syncTimeWithNTP() {
     Serial.println("[TIME] NTP時刻同期開始");
     
@@ -101,6 +189,8 @@ void setup() {
         WiFi.mode(WIFI_AP);
     }
     WiFi.softAP(ap_ssid, ap_password);
+    g_apEnabled = true;
+    g_apResumeScheduled = false;
     
     if (!LittleFS.begin()) {
         Serial.println("LittleFS マウント失敗");
@@ -159,6 +249,7 @@ void loop() {
     M5.update();
     
     tickPrintQueue();
+    processPendingAccessPointTasks();
     
     // 30秒ごとのスナップショット
     static uint32_t lastSnapshotMs = 0;

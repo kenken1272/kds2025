@@ -1640,8 +1640,11 @@ function updateCartDisplay() {
                 description = `${sideItem.name} (単品)`;
             }
         }
-        let chinchoiroMultiplier = cartItem.chinchoiroMultiplier || 1.0;
-        let chinchoiroResult = cartItem.chinchoiroResult || 'なし';
+        const chinchoiroMultiplier =
+            typeof cartItem.chinchoiroMultiplier === 'number'
+                ? cartItem.chinchoiroMultiplier
+                : 1.0;
+        const chinchoiroResult = cartItem.chinchoiroResult ?? 'なし';
         
         if (isSet && chinchoiroEnabled) {
             const adjustment = calculateChinchoiroAdjustmentClient(basePrice, chinchoiroMultiplier);
@@ -2317,6 +2320,7 @@ function showSessionEndDialog() {
                 <button class="btn btn-primary btn-large" onclick="openSalesSummaryUploader()">
                     📤 売上確認画面を開く
                     <small>Wi-Fi切替後にタップ（外部サイト）</small>
+                    <small style="display:block; margin-top:4px;">※ 押下後はAPが停止し、1分後に自動で再開します</small>
                 </button>
                 <button class="btn btn-warning btn-large" onclick="confirmEndSession()">
                     🏁 営業セッション終了
@@ -2807,10 +2811,41 @@ function closeSessionDialog() {
     }
 }
 
-function openSalesSummaryUploader() {
-    if (!confirm('売上確認ページを開く前に、Wi-Fiをアップロード用ネットワークへ切り替えましたか？\nOKを押すと外部サイトが開きます。')) {
+async function openSalesSummaryUploader() {
+    if (!confirm('OKを押すと外部サイトが開きます')) {
         return;
     }
+
+    const uploadUrl = 'https://kds-checker.vercel.app/upload';
+    const popup = window.open('about:blank', '_blank');
+
+    try {
+        const response = await fetch('/api/network/ap-cycle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ resumeAfter: 60 })
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const result = await response.json();
+        console.log('[openSalesSummaryUploader] AP suspend result:', result);
+    } catch (error) {
+        console.error('[openSalesSummaryUploader] AP suspend failed:', error);
+        if (popup && !popup.closed) {
+            popup.close();
+        }
+        alert(`APモードの停止に失敗しました。\n${error.message}`);
+        return;
+    }
+
     closeSessionDialog();
-    window.open('https://kds-checker.vercel.app/upload', '_blank');
+
+    if (popup && !popup.closed) {
+        popup.location.href = uploadUrl;
+    } else {
+        window.open(uploadUrl, '_blank');
+    }
+
+    alert('APモードを一時停止しました。1分後に自動で再開します。\nWi-Fiをアップロード用ネットワークに切り替えてください。');
 }

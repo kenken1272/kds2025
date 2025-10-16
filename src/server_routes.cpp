@@ -14,6 +14,11 @@
 #include <Preferences.h>
 #include <cstdlib>
 
+extern void requestAccessPointSuspend(uint32_t resumeDelayMs);
+extern bool isAccessPointEnabled();
+extern bool isAccessPointResumeScheduled();
+extern uint32_t getAccessPointResumeEtaMs();
+
 static void processReprintRequest(AsyncWebServerRequest *request, const JsonDocument& doc);
 static void processCancelRequest(AsyncWebServerRequest *request, const uint8_t *data, size_t len);
 
@@ -811,6 +816,45 @@ void initHttpRoutes(AsyncWebServer &server) {
 
     request->send(200, "application/json", "{\"ok\":true}");
   });
+
+  server.on("/api/network/ap-cycle", HTTP_POST, [](AsyncWebServerRequest *request) {},
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
+      StaticJsonDocument<128> body;
+      uint32_t resumeSec = 60;
+      if (len > 0) {
+        DeserializationError err = deserializeJson(body, data, len);
+        if (!err) {
+          if (body["resumeAfter"].is<uint32_t>()) {
+            resumeSec = body["resumeAfter"].as<uint32_t>();
+          } else if (body["resumeAfter"].is<int>()) {
+            int raw = body["resumeAfter"].as<int>();
+            if (raw > 0) {
+              resumeSec = static_cast<uint32_t>(raw);
+            }
+          }
+        }
+      }
+
+      if (resumeSec == 0) {
+        resumeSec = 60;
+      }
+
+      requestAccessPointSuspend(resumeSec * 1000UL);
+      Serial.printf("[WIFI] AP suspend requested for %u seconds\n", resumeSec);
+
+      StaticJsonDocument<192> res;
+      res["ok"] = true;
+      res["apActive"] = isAccessPointEnabled();
+      res["resumeInSec"] = resumeSec;
+      if (isAccessPointResumeScheduled()) {
+        res["resumeEtaMs"] = getAccessPointResumeEtaMs();
+      }
+
+      String out;
+      serializeJson(res, out);
+      request->send(200, "application/json", out);
+    });
 
   server.on("/api/export/csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     sendCsvStream(request);
