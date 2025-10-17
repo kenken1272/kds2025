@@ -47,9 +47,9 @@ static bool csvArchiveVisitor(const Order& order, const String& sessionId, uint3
 }
 
 void sendCsvStream(AsyncWebServerRequest *req){
-  String fname = "attachment; filename=\"sales_" + S().session.sessionId + ".csv\"";
+  String fname = "sales_" + S().session.sessionId + ".csv";
   AsyncResponseStream *res = req->beginResponseStream("text/csv");
-  res->addHeader("Content-Disposition", fname);
+  res->addHeader("Content-Disposition", "attachment; filename=\"" + fname + "\"");
 
   writeBOM(res);
   res->print("ts,sessionId,orderNo,lineNo,sku,name,qty,unitPriceApplied,priceMode,kind,lineTotal,status\r\n");

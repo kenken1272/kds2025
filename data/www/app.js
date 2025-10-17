@@ -169,8 +169,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         btn.dataset.loading = '1';
 
-        submitOrder().catch(console.error).finally(() => {
+        // submitOrderのPromiseをグローバルで保持
+        window.activeOrderPromise = submitOrder();
+        window.activeOrderPromise.catch(console.error).finally(() => {
             delete btn.dataset.loading;
+            window.activeOrderPromise = null;
         });
     });
 
@@ -2383,11 +2386,22 @@ async function saveMenuImmediate() {
 
 async function downloadCsv() {
     try {
-        window.open('/api/export/csv', '_blank');
+        const response = await fetch('/api/export/csv');
+        if (!response.ok) throw new Error('CSVエクスポート失敗');
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'sales.csv';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+        }, 1000);
         setTimeout(() => {
             showSessionEndDialog();
-        }, 2000); 
-        
+        }, 2000);
     } catch (error) {
         console.error('CSVエクスポートエラー:', error);
         alert('CSVエクスポートに失敗しました');
@@ -2649,15 +2663,22 @@ function getStatusLabel(status) {
 
 async function updateOrderStatus(orderNo, newStatus) {
     console.log(`注文状態更新: ${orderNo} → ${newStatus}`);
-    
+    // 注文処理中なら完了まで待機
+    if (window.activeOrderPromise) {
+        try {
+            await window.activeOrderPromise;
+        } catch (e) {
+            // submitOrder失敗時は状態変更もスキップ
+            console.error('注文処理失敗のため状態変更スキップ:', e);
+            return;
+        }
+    }
     try {
-
         const response = await fetch(`/api/orders/${orderNo}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: newStatus })
         });
-        
         if (response.ok) {
             console.log(`✅ 注文 ${orderNo} を ${newStatus} に更新`);
             closeModal();
@@ -2919,7 +2940,6 @@ async function openSalesSummaryUploader() {
     }
 
     const uploadUrl = 'https://kds-checker.vercel.app/upload';
-    const popup = window.open('about:blank', '_blank');
 
     try {
         const response = await fetch('/api/network/ap-cycle', {
@@ -2945,11 +2965,7 @@ async function openSalesSummaryUploader() {
 
     closeSessionDialog();
 
-    if (popup && !popup.closed) {
-        popup.location.href = uploadUrl;
-    } else {
-        window.open(uploadUrl, '_blank');
-    }
+    window.open(uploadUrl, '_blank');
 
     alert('売上確認ツールを新しいタブで開きました。タブレットは60秒後に自動でKDS Wi-Fiへ再接続します。');
 }
