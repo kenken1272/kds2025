@@ -653,31 +653,32 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
         const uint8_t centerAlign[] = {0x1B, 0x61, 0x01};
         _sendBytesChecked(printerSerial_, centerAlign, sizeof(centerAlign), "Center align");
 
-    if (label.length() > 0) {
-      // Ensure minimal 1-line gap between "Thank you" and QR label
-      sendLine("");
-      // Make the label the same size as the store name, then reset
-      _sendBytesChecked(printerSerial_, STORE_SIZE, sizeof(STORE_SIZE), "GS ! store size");
-      sendLine(toASCII(label));
-      _sendBytesChecked(printerSerial_, STORE_RESET, sizeof(STORE_RESET), "GS ! reset");
-      // Do NOT add another blank line here — keep only the single minimal line above
-    }
+          if (label.length() > 0) {
+            // Ensure minimal 1-line gap between "Thank you" and QR label
+            sendLine("");
+            // Make the label the same size as the store name, then reset
+            _sendBytesChecked(printerSerial_, STORE_SIZE, sizeof(STORE_SIZE), "GS ! store size");
+            sendLine(toASCII(label));
+            _sendBytesChecked(printerSerial_, STORE_RESET, sizeof(STORE_RESET), "GS ! reset");
+            // Do NOT add another blank line here — keep only the single minimal line above
+          }
 
-    if (payload.length() > 0) {
-      printQRCode(payload);
-    }
+          if (payload.length() > 0) {
+            printQRCode(payload);
+          }
 
         const uint8_t leftAlign[] = {0x1B, 0x61, 0x00};
         _sendBytesChecked(printerSerial_, leftAlign, sizeof(leftAlign), "Left align");
         // Removed the extra blank line after the QR to reduce spacing before cut
         // sendLine("");
-    }
+          }
 
-    // Reduce feed lines after QR to minimize gap before cut (0 = no extra feed)
-    sendFeedLines(0);
-  sendCutCommand();
-  return any;
-}
+          // Reduce feed lines after QR to about half the previous gap.
+          // Use 1 line feed here to halve the space compared to the typical 2-2+ lines.
+          sendFeedLines(1);
+        sendCutCommand();
+        return any;
+      }
 
 bool PrinterRenderer::printReceiptEN(const Order& order) {
   if (!isReady()) return false;
