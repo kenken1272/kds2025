@@ -26,6 +26,18 @@ const state = {
 };
 
 let _reloadTimer = null;
+
+function normalizeQrContentInput(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+
+    let normalized = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    normalized = normalized.replace(/\t/g, ' ');
+    normalized = normalized.replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+    normalized = normalized.replace(/\u3000/g, ' ');
+    return normalized.trim();
+}
 function scheduleStateReload() {
     if (_reloadTimer) {
         return;
@@ -614,106 +626,87 @@ function renderOrderPage() {
     
     return `
         ${paperWarning}
-        
-        <div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <h2>新規注文</h2>
-                <button class="btn btn-info" onclick="toggleCompletedOrders()" id="toggle-completed-btn">
-                    📋 キャンセル・再印刷
-                </button>
-            </div>
-            
-            <!-- 注文済み一覧ウィジェット -->
-            <div id="completed-orders-widget" class="completed-orders-widget" style="display: none;">
-                <h3>📋 注文済み一覧</h3>
-                <div id="completed-orders-list" class="completed-orders-list">
-                    <!-- 動的に生成 -->
+
+        <div class="order-layout">
+            <div class="order-left">
+                <div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h2>新規注文</h2>
+                        <button class="btn btn-info" onclick="toggleCompletedOrders()" id="toggle-completed-btn">
+                            📋 キャンセル・再印刷
+                        </button>
+                    </div>
+                    <div id="completed-orders-widget" class="completed-orders-widget" style="display: none;">
+                        <h3>📋 注文済み一覧</h3>
+                        <div id="completed-orders-list" class="completed-orders-list">
+                        </div>
+                    </div>
+
+                    <h3>メイン商品</h3>
+                    <div class="grid">
+                        ${mainItems.map(item => {
+                            const normalPrice = item.price_normal;
+                            const presalePrice = item.price_normal + item.presale_discount_amount;
+                            const hasPresale = state.data.settings.presaleEnabled && item.presale_discount_amount < 0;
+                            const hasSides = sideItems.length > 0;
+                            return `
+                            <div class="card product-card">
+                                <h4>${item.name}</h4>
+                                <p style="margin: 5px 0;">通常: ${normalPrice}円</p>
+                                ${hasPresale ? `<p style="margin: 5px 0;">前売: ${presalePrice}円</p>` : ''}
+
+                                <div class="product-card-grid">
+                                    <button class="btn btn-primary" onclick="addMainSingle('${item.sku}', 'normal')" 
+                                            ${state.data.printer.paperOut ? 'disabled' : ''}>
+                                        通常
+                                    </button>
+                                    ${hasPresale ? `<button class="btn btn-success" onclick="addMainSingle('${item.sku}', 'presale')" ${state.data.printer.paperOut ? 'disabled' : ''}>前売</button>` : ''}
+                                    ${hasSides ? `<button class="btn btn-warning" onclick="showSideSelectModal('${item.sku}', 'normal')" ${state.data.printer.paperOut ? 'disabled' : ''}><span style="display:inline-block; line-height:1.05;">セット<br><small style="font-size:0.85em; font-weight:700;">（通常）</small></span></button>` : '<div style="color: #999; font-size: 0.9em; padding: 6px;">※サイドなし</div>'}
+                                    ${hasSides && hasPresale ? `<button class="btn btn-info" onclick="showSideSelectModal('${item.sku}', 'presale')" ${state.data.printer.paperOut ? 'disabled' : ''}><span style="display:inline-block; line-height:1.05;">セット<br><small style="font-size:0.85em; font-weight:700;">（前売）</small></span></button>` : ''}
+                                </div>
+                            </div>
+                        `}).join('')}
+                    </div>
+
+                    <h3>サイド単品</h3>
+                    <div class="grid">
+                        ${sideItems.map(item => `
+                            <div class="card">
+                                <h4>${item.name}</h4>
+                                <p>単品: ${item.price_single}円</p>
+                                <button class="btn btn-secondary" onclick="addToCart('SIDE_SINGLE', '${item.sku}')" ${state.data.printer.paperOut ? 'disabled' : ''}>
+                                    追加
+                                </button>
+                            </div>
+                        `).join('')}
+                    </div>
                 </div>
             </div>
-            
-            <!-- メイン選択 -->
-            <h3>メイン商品</h3>
-            <div class="grid">
-                ${mainItems.map(item => {
-                    const normalPrice = item.price_normal;
-                    const presalePrice = item.price_normal + item.presale_discount_amount;
-                    const hasPresale = state.data.settings.presaleEnabled && item.presale_discount_amount < 0;
-                    const hasSides = sideItems.length > 0;
-                    
-                    return `
+
+            <div class="order-right">
+                <div class="sticky-actions">
                     <div class="card">
-                        <h4>${item.name}</h4>
-                        <p style="margin: 5px 0;">通常: ${normalPrice}円</p>
-                        ${hasPresale ? `<p style="margin: 5px 0;">前売: ${presalePrice}円</p>` : ''}
-                        
-                        <!-- 単品ボタン -->
-                        <button class="btn btn-primary" onclick="addMainSingle('${item.sku}', 'normal')" 
-                                ${state.data.printer.paperOut ? 'disabled' : ''}
-                                style="width: 100%; margin-bottom: 5px;">
-                            通常
-                        </button>
-                        ${hasPresale ? `
-                        <button class="btn btn-success" onclick="addMainSingle('${item.sku}', 'presale')" 
-                                ${state.data.printer.paperOut ? 'disabled' : ''}
-                                style="width: 100%; margin-bottom: 5px;">
-                            前売り
-                        </button>` : ''}
-                        
-                        <!-- セットボタン -->
-                        ${hasSides ? `
-                        <button class="btn btn-warning" onclick="showSideSelectModal('${item.sku}', 'normal')" 
-                                ${state.data.printer.paperOut ? 'disabled' : ''}
-                                style="width: 100%; margin-bottom: 5px;">
-                            セット（通常）
-                        </button>
-                        ${hasPresale ? `
-                        <button class="btn btn-info" onclick="showSideSelectModal('${item.sku}', 'presale')" 
-                                ${state.data.printer.paperOut ? 'disabled' : ''}
-                                style="width: 100%; margin-bottom: 5px;">
-                            セット（前売り）
-                        </button>` : ''}
-                        ` : '<p style="color: #999; font-size: 0.9em;">※サイド商品なし</p>'}
+                        <h3>注文カート</h3>
+                        <div id="cart-items"></div>
                     </div>
-                `}).join('')}
-            </div>
-            
-            <!-- サイド単品 -->
-            <h3>サイド単品</h3>
-            <div class="grid">
-                ${sideItems.map(item => `
+
                     <div class="card">
-                        <h4>${item.name}</h4>
-                        <p>単品: ${item.price_single}円</p>
-                        <button class="btn btn-secondary" onclick="addToCart('SIDE_SINGLE', '${item.sku}')" ${state.data.printer.paperOut ? 'disabled' : ''}>
-                            追加
+                        <button id="confirm-order-btn" class="btn btn-success btn-large" 
+                                data-action="confirm-order" 
+                                type="button" 
+                                onclick="handleConfirmOrder(event)"
+                                ${state.cart.length === 0 || state.data.printer.paperOut ? 'disabled' : ''} 
+                                style="font-size: 1.2em; padding: 12px 20px; width: 100%;">
+                            📝 注文確定
                         </button>
-                    </div>
-                `).join('')}
-            </div>
-            
-            <!-- カート -->
-            <div class="card">
-                <h3>注文カート</h3>
-                <div id="cart-items"></div>
-                <div style="margin-top: 15px;">
-                    <button id="confirm-order-btn" class="btn btn-success btn-large" 
-                            data-action="confirm-order" 
-                            type="button" 
-                            onclick="handleConfirmOrder(event)"
-                            ${state.cart.length === 0 || state.data.printer.paperOut ? 'disabled' : ''} 
-                            style="font-size: 1.5em; padding: 15px 30px; width: 100%; margin-bottom: 10px;">
-                        📝 注文確定
-                    </button>
-                    <button class="btn btn-secondary" onclick="clearCart()" style="width: 100%;">
-                        🗑️ カートクリア
-                    </button>
-                    <div style="margin-top: 10px; padding: 8px; background: #f8f9fa; border-radius: 5px; font-size: 0.85em; color: #666; text-align: center;">
-                        💡 注文確定ボタンをクリックすると即座に注文が送信されます（画面遷移不要）
+                        <button class="btn btn-secondary" onclick="clearCart()" style="width: 100%; margin-top: 8px;">
+                            🗑️ カートクリア
+                        </button>
+                        
                     </div>
                 </div>
             </div>
         </div>
-        
 
     `;
 }
@@ -1149,6 +1142,18 @@ function renderSettingsPage() {
             </div>
         `;
     } else if (state.settingsTab === 'qrprint') {
+        // split existing stored content into label and payload for the UI
+        let stored = state.data.settings.qrPrint.content || '';
+        let storedLabel = '';
+        let storedPayload = '';
+        const idx = stored.indexOf('\n');
+        if (idx >= 0) {
+            storedLabel = stored.substring(0, idx);
+            storedPayload = stored.substring(idx + 1);
+        } else {
+            storedPayload = stored;
+        }
+
         tabContent = `
             <div class="card">
                 <div class="settings-header">
@@ -1169,20 +1174,22 @@ function renderSettingsPage() {
                     </section>
 
                     <section class="settings-section">
-                        <h4>QRコード内容</h4>
-                        <p class="settings-note">URL、メッセージ等を入力してください</p>
+                        <h4>QRコード印刷内容（ラベル / 本文）</h4>
+                        <p class="settings-note">ラベルはQRの上に表示される短いテキストです。本文はQRにエンコードされる内容です。</p>
                         <div class="settings-field">
-                            <label for="qrprint-content">印刷する内容</label>
-                            <textarea id="qrprint-content" placeholder="例: https://example.com&#10;またはメッセージテキスト">${state.data.settings.qrPrint.content || ''}</textarea>
+                            <label for="qrprint-label">ラベル（1行）</label>
+                            <input id="qrprint-label" type="text" class="form-control" value="${storedLabel}">
+                        </div>
+                        <div class="settings-field">
+                            <label for="qrprint-payload">QR 本文（複数行可）</label>
+                            <textarea id="qrprint-payload" placeholder="https://example.com/\nまたはメッセージ" rows="4">${storedPayload}</textarea>
                         </div>
                         <div class="settings-field">
                             <strong>使用例</strong>
                             <ul class="settings-list">
-                                <li>店舗ウェブサイトURL</li>
-                                <li>アンケートフォーム</li>
-                                <li>SNSアカウント</li>
-                                <li>クーポンコード</li>
-                                <li>お礼メッセージ</li>
+                                <li>ラベル: Instagram / 本文: https://instagram.com/your_account</li>
+                                <li>ラベル: Survey / 本文: https://forms.example.com/abc</li>
+                                <li>ラベル空欄にして直接本文のみをQRにすることも可能です</li>
                             </ul>
                         </div>
                     </section>
@@ -2195,7 +2202,23 @@ async function saveChinchoiroSettings() {
 
 async function saveQrPrintSettings() {
     const enabled = document.getElementById('qrprint-enabled').checked;
-    const content = document.getElementById('qrprint-content').value.trim();
+    const labelField = document.getElementById('qrprint-label');
+    const payloadField = document.getElementById('qrprint-payload');
+    const label = labelField ? labelField.value.trim() : '';
+    const payloadRaw = payloadField ? payloadField.value : '';
+    const rawContent = label.length > 0 ? (label + '\n' + payloadRaw) : payloadRaw;
+    const content = normalizeQrContentInput(rawContent);
+    // reflect normalized back into fields to show cleaned result
+    if (labelField && payloadField) {
+        const nl = content.indexOf('\n');
+        if (nl >= 0) {
+            labelField.value = content.substring(0, nl);
+            payloadField.value = content.substring(nl + 1);
+        } else {
+            labelField.value = '';
+            payloadField.value = content;
+        }
+    }
     
     try {
         const response = await fetch('/api/settings/qrprint', {

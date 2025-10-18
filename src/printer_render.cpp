@@ -1,6 +1,7 @@
 #include "printer_render.h"
 #include <M5Unified.h>
 #include <time.h>
+#include <algorithm> // for std::max
 
 static bool _sendBytesChecked(HardwareSerial* ser, const uint8_t* p, size_t n, const char* tag) {
   if (!ser || !p || !n) return false;
@@ -235,24 +236,44 @@ int PrinterRenderer::drawStoreName(M5Canvas& sp, const String& name, int y) {
   sp.setTextDatum(textdatum_t::top_center);
   sp.setTextColor(TFT_BLACK, TFT_WHITE);
   sp.setFont(&fonts::Font7);
-  sp.setTextSize(2);
-  sp.drawString(name, DOT_WIDTH/2, y);
-  return y + 32 + 8;
+  sp.setTextSize(2); // store name size set to 2 as requested
+  sp.setTextPadding(0);
+  // Ensure single-line and no leading/trailing whitespace
+  String single = name;
+  single.replace('\r', ' ');
+  single.replace('\n', ' ');
+  single.trim();
+  if (single.length() == 0) single = " ";
+  // force single-line: truncate until it fits width
+  const int maxWidth = DOT_WIDTH - 8;
+  while (single.length() > 1 && sp.textWidth(single) > maxWidth) {
+    single.remove(single.length() - 1);
+  }
+  // draw centered
+  sp.drawString(single, DOT_WIDTH / 2, y);
+  return y + 32 + 6;
 }
 
 int PrinterRenderer::drawOrderNumber(M5Canvas& sp, const String& orderNo, int y) {
   sp.setTextDatum(textdatum_t::top_center);
   sp.setTextColor(TFT_BLACK, TFT_WHITE);
   sp.setFont(&fonts::Font7);
-  sp.setTextSize(4);
-  
-  y += 10;
-  sp.drawString("Order No.", DOT_WIDTH/2, y);
-  y += 56;
-  sp.drawString(orderNo, DOT_WIDTH/2, y);
-  y += 56 + 10;
-  
-  return y + 8;
+  sp.setTextSize(3); // slightly smaller than before
+  sp.setTextPadding(0);
+  // Render "Order No. <number>" centered and force one-line
+  y += 18;
+  String line = String("Order No.") + " " + orderNo;
+  line.replace('\r', ' ');
+  line.replace('\n', ' ');
+  line.trim();
+  if (line.length() == 0) line = " ";
+  const int maxWidth = DOT_WIDTH - 8;
+  while (line.length() > 1 && sp.textWidth(line) > maxWidth) {
+    line.remove(line.length() - 1);
+  }
+  sp.drawString(line, DOT_WIDTH / 2, y);
+  y += 48;
+  return y + 6;
 }
 
 int PrinterRenderer::drawSeparator(M5Canvas& sp, int y) {
@@ -379,7 +400,8 @@ bool PrinterRenderer::printReceiptJP(const PrintOrderData& od) {
     sp.createSprite(DOT_WIDTH, 28);
     sp.fillScreen(TFT_WHITE);
     int y = 4;
-    y = drawDateTime(sp, od.dateTime, y);
+    // Date/time under Total removed per user request
+    // y = drawDateTime(sp, od.dateTime, y);
   if (!sendAndDelete(sp)) return false;
   }
 
@@ -553,17 +575,48 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
   printerInit();
   bool any=false;
   auto sendLine=[&](const String& s){ String line=toASCII(s)+"\n"; bool ok=_sendBytesChecked(printerSerial_, (const uint8_t*)line.c_str(), line.length(), "LINE"); any = any || ok; };
+  const int LINE_WIDTH = 30; // characte for yout
+  auto sendCentered=[&](const String& s){ String t = toASCII(s); int pad = max(0, (LINE_WIDTH - (int)t.length())/2); String out; for (int i=0;i<pad;i++) out += ' '; out += t; sendLine(out); };
+
   sendLine("==============================");
-  sendLine(toASCII(od.storeName));
+
+  // Helper: make single-line, trimmed, ASCII-safe and truncated to LINE_WIDTH
+  auto makeSingleLine = [&](const String& in) {
+    String s = in;
+    s.replace('\r', ' ');
+    s.replace('\n', ' ');
+    s.trim();
+    if (s.length() == 0) s = " ";
+    while (s.length() > LINE_WIDTH) s.remove(s.length() - 1);
+    return s;
+  };
+
+  const uint8_t LEFT_ALIGN[]  = {0x1B, 0x61, 0x00};
+  const uint8_t STORE_SIZE[]  = {0x1D, 0x21, 0x10};
+  const uint8_t STORE_RESET[] = {0x1D, 0x21, 0x00};
+  const uint8_t D_W_H[]       = {0x1D, 0x21, 0x11};
+  const uint8_t D_RESET[]     = {0x1D, 0x21, 0x00};
+
+  // Ensure left alignment
+  _sendBytesChecked(printerSerial_, LEFT_ALIGN, sizeof(LEFT_ALIGN), "Left align");
+
+  // Store name: single line, left-aligned, with larger size then reset
+  String storeLine = makeSingleLine(od.storeName);
+  _sendBytesChecked(printerSerial_, STORE_SIZE, sizeof(STORE_SIZE), "GS ! store size");
+  sendLine(storeLine);
+  _sendBytesChecked(printerSerial_, STORE_RESET, sizeof(STORE_RESET), "GS ! reset");
+  // Reduced spacing: remove extra blank line here to tighten gap under store name
+
   sendLine("==============================");
-  sendLine("");
-  
-  const uint8_t D_W_H[] = {0x1D, 0x21, 0x11};
-  const uint8_t D_RESET[] = {0x1D, 0x21, 0x00};
-  _sendBytesChecked(printerSerial_, D_W_H, sizeof(D_W_H), "GS ! 0x11 (double size)");
-  sendLine("Order No. " + toASCII(od.orderNo));
-  _sendBytesChecked(printerSerial_, D_RESET, sizeof(D_RESET), "GS ! 0x00 (reset size)");
-  
+  // Order number: single line, left-aligned, larger size then reset
+  String orderLine = makeSingleLine(String("Order No: ") + od.orderNo);
+  _sendBytesChecked(printerSerial_, D_W_H, sizeof(D_W_H), "GS ! double size");
+  sendLine(orderLine);
+  _sendBytesChecked(printerSerial_, D_RESET, sizeof(D_RESET), "GS ! reset");
+
+  // Date left-aligned under Order No
+  sendLine(isTimeValid() ? getCurrentDateTime() : String("----/--/-- --:--:--"));
+
   sendLine("------------------------------");
   const size_t n = od.itemsRomaji.size();
   for (size_t i=0; i<n; ++i) {
@@ -577,7 +630,7 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
     String qtyStr = "x" + String(qty);
     while (qtyStr.length() < 4) qtyStr = " " + qtyStr;
     
-    String priceStr = String(unit) + "yen";
+    String priceStr = String(unit) + " Yen";
     while (priceStr.length() < 8) priceStr = " " + priceStr;
     
     sendLine(name + qtyStr + priceStr);
@@ -586,25 +639,42 @@ bool PrinterRenderer::printReceiptEN(const PrintOrderData& od) {
   
   String totalLabel = "TOTAL";
   while (totalLabel.length() < 19) totalLabel += " ";
-  String totalPrice = String(od.totalAmount) + "yen";
+  String totalPrice = String(od.totalAmount) + " Yen";
   while (totalPrice.length() < 8) totalPrice = " " + totalPrice;
   sendLine(totalLabel + totalPrice);
-  sendLine(isTimeValid() ? getCurrentDateTime() : "Time not synced");
   sendLine(toASCII(od.footerMessage));
-  
-  if (S().settings.qrPrint.enabled && S().settings.qrPrint.content.length() > 0) {
-    sendLine("");
-    const uint8_t centerAlign[] = {0x1B, 0x61, 0x01};
-    _sendBytesChecked(printerSerial_, centerAlign, sizeof(centerAlign), "Center align");
-    
-    printQRCode(S().settings.qrPrint.content);
-    
-    const uint8_t leftAlign[] = {0x1B, 0x61, 0x00};
-    _sendBytesChecked(printerSerial_, leftAlign, sizeof(leftAlign), "Left align");
-    sendLine("");
-  }
-  
-  sendFeedLines(4);
+
+    if (S().settings.qrPrint.enabled && S().settings.qrPrint.content.length() > 0) {
+        String raw = S().settings.qrPrint.content;
+        int nl = raw.indexOf('\n');
+        String label = nl >= 0 ? raw.substring(0, nl) : String("");
+        String payload = nl >= 0 ? raw.substring(nl+1) : raw;
+
+        const uint8_t centerAlign[] = {0x1B, 0x61, 0x01};
+        _sendBytesChecked(printerSerial_, centerAlign, sizeof(centerAlign), "Center align");
+
+    if (label.length() > 0) {
+      // Ensure minimal 1-line gap between "Thank you" and QR label
+      sendLine("");
+      // Make the label the same size as the store name, then reset
+      _sendBytesChecked(printerSerial_, STORE_SIZE, sizeof(STORE_SIZE), "GS ! store size");
+      sendLine(toASCII(label));
+      _sendBytesChecked(printerSerial_, STORE_RESET, sizeof(STORE_RESET), "GS ! reset");
+      // Do NOT add another blank line here — keep only the single minimal line above
+    }
+
+    if (payload.length() > 0) {
+      printQRCode(payload);
+    }
+
+        const uint8_t leftAlign[] = {0x1B, 0x61, 0x00};
+        _sendBytesChecked(printerSerial_, leftAlign, sizeof(leftAlign), "Left align");
+        // Removed the extra blank line after the QR to reduce spacing before cut
+        // sendLine("");
+    }
+
+    // Reduce feed lines after QR to minimize gap before cut (0 = no extra feed)
+    sendFeedLines(0);
   sendCutCommand();
   return any;
 }
@@ -655,7 +725,8 @@ bool PrinterRenderer::printQRCode(const String& content) {
     return false;
   }
   
-  if (content.length() == 0) {
+  String normalized = normalizeQrContent(content);
+  if (normalized.length() == 0) {
     return true;
   }
 
@@ -668,7 +739,7 @@ bool PrinterRenderer::printQRCode(const String& content) {
   ok &= _sendBytesChecked(printerSerial_, setSize, sizeof(setSize), "QR Size");
   ok &= _sendBytesChecked(printerSerial_, setECC, sizeof(setECC), "QR ECC");
 
-  int dataLen = content.length() + 3;
+  int dataLen = normalized.length() + 3;
   uint8_t pL = dataLen & 0xFF;
   uint8_t pH = (dataLen >> 8) & 0xFF;
 
@@ -680,7 +751,7 @@ bool PrinterRenderer::printQRCode(const String& content) {
   printerSerial_->write(0x31);
   printerSerial_->write(0x50);
   printerSerial_->write(0x30);
-  printerSerial_->write((const uint8_t*)content.c_str(), content.length());
+  printerSerial_->write((const uint8_t*)normalized.c_str(), normalized.length());
   printerSerial_->flush();
   delay(50);
 

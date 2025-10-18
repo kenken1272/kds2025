@@ -15,6 +15,95 @@ static SalesSummary g_salesSummary;
 static volatile bool g_snapshotSaveRequested = false;
 static String g_menuEtag;
 
+static uint32_t decodeUtf8Codepoint(const String& s, size_t index, size_t* advance) {
+    if (!advance) {
+        return 0;
+    }
+    if (index >= s.length()) {
+        *advance = 0;
+        return 0;
+    }
+    const uint8_t c = static_cast<uint8_t>(s[index]);
+    if (c < 0x80) {
+        *advance = 1;
+        return c;
+    }
+    if ((c & 0xE0) == 0xC0 && index + 1 < s.length()) {
+        uint8_t b1 = static_cast<uint8_t>(s[index + 1]);
+        *advance = 2;
+        return ((c & 0x1F) << 6) | (b1 & 0x3F);
+    }
+    if ((c & 0xF0) == 0xE0 && index + 2 < s.length()) {
+        uint8_t b1 = static_cast<uint8_t>(s[index + 1]);
+        uint8_t b2 = static_cast<uint8_t>(s[index + 2]);
+        *advance = 3;
+        return ((c & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+    }
+    if ((c & 0xF8) == 0xF0 && index + 3 < s.length()) {
+        uint8_t b1 = static_cast<uint8_t>(s[index + 1]);
+        uint8_t b2 = static_cast<uint8_t>(s[index + 2]);
+        uint8_t b3 = static_cast<uint8_t>(s[index + 3]);
+        *advance = 4;
+        return ((c & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
+    }
+    *advance = 1;
+    return c;
+}
+
+String normalizeQrContent(const String& raw) {
+    if (raw.isEmpty()) {
+        return String();
+    }
+
+    String out;
+    out.reserve(raw.length());
+
+    for (size_t i = 0; i < raw.length();) {
+        size_t advance = 1;
+        uint32_t cp = decodeUtf8Codepoint(raw, i, &advance);
+        if (advance == 0) {
+            break;
+        }
+
+        if (cp == '\r') {
+            i += advance;
+            continue;
+        }
+        if (cp == '\n') {
+            out += '\n';
+            i += advance;
+            continue;
+        }
+        if (cp == '\t') {
+            out += ' ';
+            i += advance;
+            continue;
+        }
+        if (cp >= 0x20 && cp <= 0x7E) {
+            out += static_cast<char>(cp);
+            i += advance;
+            continue;
+        }
+        if (cp == 0x3000) {
+            out += ' ';
+            i += advance;
+            continue;
+        }
+        if (cp >= 0xFF01 && cp <= 0xFF5E) {
+            char ascii = static_cast<char>(cp - 0xFEE0);
+            out += ascii;
+            i += advance;
+            continue;
+        }
+
+        out.concat(raw.substring(i, i + advance));
+        i += advance;
+    }
+
+    out.trim();
+    return out;
+}
+
 State& S() {
     return g_state;
 }

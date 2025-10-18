@@ -107,6 +107,8 @@ String allocateOrderNo();
 String generateSkuMain();
 String generateSkuSide();
 
+String normalizeQrContent(const String& raw);
+
 Order* findOrderByNo(const String& orderNo);
 int computeOrderTotal(const Order& order);
 void orderToJson(JsonObject json, const Order& order);

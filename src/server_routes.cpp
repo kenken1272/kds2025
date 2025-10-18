@@ -583,18 +583,19 @@ void initHttpRoutes(AsyncWebServer &server) {
         return;
       }
 
-      S().settings.qrPrint.enabled = doc["enabled"] | S().settings.qrPrint.enabled;
-      S().settings.qrPrint.content = doc["content"] | S().settings.qrPrint.content;
+  S().settings.qrPrint.enabled = doc["enabled"] | S().settings.qrPrint.enabled;
+  String qrContent = doc["content"] | S().settings.qrPrint.content;
+  S().settings.qrPrint.content = normalizeQrContent(qrContent);
 
-      Serial.printf("QR Print設定更新: enabled=%d, content=%s\n", 
-                    S().settings.qrPrint.enabled, S().settings.qrPrint.content.c_str());
+  Serial.printf("QR Print設定更新: enabled=%d, content=%s\n",
+        S().settings.qrPrint.enabled, S().settings.qrPrint.content.c_str());
 
       // WAL記録（JSON形式）
   StaticJsonDocument<512> walDoc;
       walDoc["ts"] = (uint32_t)time(nullptr);
       walDoc["action"] = "SETTINGS_UPDATE";
       walDoc["qrPrint"]["enabled"] = S().settings.qrPrint.enabled;
-      walDoc["qrPrint"]["content"] = S().settings.qrPrint.content;
+  walDoc["qrPrint"]["content"] = S().settings.qrPrint.content;
       String walLine; serializeJson(walDoc, walLine);
       walAppend(walLine);
       

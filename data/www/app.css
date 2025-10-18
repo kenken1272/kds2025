@@ -229,6 +229,134 @@ body {
     margin: 20px 0;
 }
 
+/* 注文画面専用レイアウト: 左60% / 右40% (タブレット横長優先) */
+.order-layout {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+}
+
+.order-left {
+    flex: 0 0 60%;
+    max-width: 60%;
+}
+
+.order-right {
+    flex: 1 1 40%;
+    max-width: 40%;
+}
+
+/* メイン商品カード内のボタンを2行×2列にする */
+.product-card-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    grid-auto-rows: minmax(72px, auto);
+    gap: 10px;
+}
+
+.product-card-grid .btn {
+    padding: 8px 10px;
+    font-size: 13px;
+}
+
+/* メイン商品カード自体の調整（少し圧縮してカード数を横並びに対応） */
+.card.product-card {
+    padding: 12px;
+}
+
+/* 右カラム内の注文ボタン等を縦並びで目立たせる */
+.order-right .sticky-actions {
+    position: sticky;
+    top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* タブレット横向きを優先するためのメディアクエリ */
+@media (max-width: 1200px) and (min-width: 769px) {
+    .order-left { flex-basis: 60%; max-width: 60%; }
+    .order-right { flex-basis: 40%; max-width: 40%; }
+}
+
+/* 小さい画面では縦積みに戻す（既存のレスポンシブ保護） */
+@media (max-width: 768px) {
+    .order-layout { flex-direction: column; }
+    .order-left, .order-right { max-width: 100%; flex-basis: 100%; }
+    .product-card-grid { grid-template-columns: 1fr; }
+}
+
+/* 注文画面専用のボタンカラーパレット（画面内限定で上書き） */
+.order-left .product-card .btn {
+    border: none;
+    color: #fff;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+
+/* 通常ボタン（メインの通常） */
+.order-left .product-card .btn-primary {
+    background: #0d6efd; /* 落ち着いた青 */
+}
+.order-left .product-card .btn-primary:hover { background: #0b5ed7; }
+
+/* 前売りボタン（目立たせたいが強すぎない紫） */
+.order-left .product-card .btn-success {
+    background: #6f42c1; /* 紫系 */
+}
+.order-left .product-card .btn-success:hover { background: #5a34a6; }
+
+/* セットボタン（柔らかいコーラル） */
+.order-left .product-card .btn-warning {
+    background: #ff7f50; /* コーラル */
+    color: #222; /* コントラスト */
+}
+.order-left .product-card .btn-warning:hover { background: #ff6a33; }
+
+/* セット（前売）など info ボタンの調整 */
+.order-left .product-card .btn-info {
+    background: #20c997; /* 明るめの緑（アクセント） */
+}
+.order-left .product-card .btn-info:hover { background: #17a589; }
+
+/* 変更: 4つのボタンを薄めの同一色に揃え、文字を太字で大きめにする */
+.order-left .product-card .btn-primary,
+.order-left .product-card .btn-success,
+.order-left .product-card .btn-warning,
+.order-left .product-card .btn-info {
+    background:#89bafb;; /* 薄めのブルー */
+    color: #000000; /* テキストは濃いブルーで可読性確保 */
+    border: 2px solid #000; /* 黒い縁取り */
+    font-weight: 700; /* 太字 */
+    font-size: 1.05rem; /* 文字を大きめに */
+    padding: 12px 10px;
+}
+.order-left .product-card .btn-primary:hover,
+.order-left .product-card .btn-success:hover,
+.order-left .product-card .btn-warning:hover,
+.order-left .product-card .btn-info:hover {
+    background: #d7e9ff; /* ホバーで少し濃く */
+}
+
+/* ボタン内のテキストを中央で太字に見せるために line-height を調整 */
+.order-left .product-card .btn {
+    line-height: 1.2;
+}
+
+/* 右カラム（注文確定ボタン）を目立たせる */
+.order-right .btn-success.btn-large {
+    background: #198754; /* 深めのグリーン */
+    color: #fff;
+    box-shadow: 0 6px 18px rgba(25,135,84,0.18);
+}
+.order-right .btn-success.btn-large:hover { background: #146c43; }
+
+/* ボタンのdisabledスタイル調整（注文画面内） */
+.order-layout .btn[disabled] {
+    opacity: 0.55;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
 /* レスポンシブ */
 @media (max-width: 768px) {
     .nav-btn {
