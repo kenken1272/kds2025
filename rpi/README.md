@@ -18,6 +18,28 @@ python -m venv .venv
 pip install -r rpi/requirements.txt
 ```
 
+## systemd と AP の簡単手順（概要）
+
+1. `.env` を作成（下の `.env.example` を参照）
+2. `rpi/atomprinter.service` を `/etc/systemd/system/atomprinter.service` にコピーしてパス・ユーザーを確認
+3. hostapd/dnsmasq の設定は本 README の後半を参照（手動での設定は環境に依存します）
+4. systemd をリロードして有効化
+
+```powershell
+sudo systemctl daemon-reload
+sudo systemctl enable atomprinter.service
+sudo systemctl start atomprinter.service
+```
+
+## .env の例
+設定の最小例は `rpi/.env.example` を参照してください。主な項目:
+- TTY_DEVICE: /dev/ttyUSB0 など実機の接続先
+- BAUD: 115200
+- API_PORT: 8000
+
+## 注意
+この実装は「ラズパイ上で素早く動作確認できる」ことを目的にしており、実運用では hostapd/dnsmasq の設定、systemd ユニットのユーザーや仮想環境パス、ログローテーションなどを適切に調整してください。
+
 3. 環境変数ファイル `.env` をプロジェクトルートに置く（`rpi/setup/.env.example` を参照）
 4. systemd か手動で起動
 

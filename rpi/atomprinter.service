@@ -1,0 +1,14 @@
+[Unit]
+Description=Atom KDS FastAPI service
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/atomprinter
+EnvironmentFile=/home/pi/atomprinter/.env
+ExecStart=/home/pi/atomprinter/.venv/bin/uvicorn rpi.app:app --host 0.0.0.0 --port ${API_PORT}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

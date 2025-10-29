@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KDS - Kitchen Display System</title>
+    <link rel="stylesheet" href="app.css">
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#111">
+</head>
+<body>
+    <!-- ナビゲーション -->
+    <nav class="nav">
+        <button class="nav-btn" data-page="order">注文</button>
+        <button class="nav-btn" data-page="kitchen">キッチン</button>
+        <button class="nav-btn" data-page="pickup">品出し</button>
+        <button class="nav-btn" data-page="call">呼び出し</button>
+        <button class="nav-btn" data-page="settings">設定</button>
+        <button class="nav-btn" data-page="export">エクスポート</button>
+    </nav>
+
+    <!-- メインコンテンツ -->
+    <main id="app">
+        <!-- ページコンテンツがここに動的に表示される -->
+    </main>
+
+    <!-- 切断モーダル -->
+    <div id="offline-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>⚠️ 接続が切断されました</h3>
+            <p>Wi-Fiにつなぎ直してください</p>
+            <button id="reconnect-btn" class="btn btn-primary">再接続</button>
+        </div>
+    </div>
+
+    <!-- 接続状態インジケータ -->
+    <div id="connection-status" class="status-indicator online">●</div>
+
+    <script src="app.js"></script>
+</body>
+</html>
