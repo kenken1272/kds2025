@@ -23,7 +23,7 @@ public:
   PrinterRenderer();
   ~PrinterRenderer();
 
-n  bool initialize(HardwareSerial* serial);
+  bool initialize(HardwareSerial* serial);
   void cleanup();
 
   void printerInit();

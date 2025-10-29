@@ -34,7 +34,7 @@ static void fillOrderJson(JsonObject obj, const Order& order) {
     obj["cancelReason"] = order.cancelReason;
   }
 
-n  JsonArray itemsArray = obj["items"].to<JsonArray>();
+  JsonArray itemsArray = obj["items"].to<JsonArray>();
   for (const auto& item : order.items) {
     JsonObject j = itemsArray.add<JsonObject>();
     j["sku"] = item.sku;
@@ -59,7 +59,7 @@ struct ArchiveStreamContext {
   ArchiveStreamContext()
     : stream(nullptr), sessionFilter(nullptr), first(true) {}
 
-n  ArchiveStreamContext(AsyncResponseStream* s, const String* filter, bool isFirst)
+  ArchiveStreamContext(AsyncResponseStream* s, const String* filter, bool isFirst)
     : stream(s), sessionFilter(filter), first(isFirst) {}
 };
 

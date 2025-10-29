@@ -5,7 +5,7 @@
 extern String getCurrentDateTime();
 extern bool isTimeValid();
 
-nstatic std::deque<OrderPrintJob> printQueue;
+static std::deque<OrderPrintJob> printQueue;
 static std::deque<OrderPrintJob> holdQueue;
 
 String formatOrderTicket(const Order& order) {
