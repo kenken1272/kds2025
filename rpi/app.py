@@ -1,11 +1,12 @@
-"""Minimal FastAPI server to replace ESP32 webserver.
+"""FastAPI port of the Atom Lite web server for Raspberry Pi.
 
-Features implemented here (minimal):
-- Serve static files from project `data/www` (PWA frontend)
-- /api/ping
-- /api/orders (POST to enqueue a print job)
-- WebSocket `/ws` that broadcasts simple events
-- Background print worker that uses PrinterAdapter (rpi/printer.py)
+This app mirrors the ESP32 firmware features:
+
+* Serves the PWA frontend from ``rpi/data/www``
+* Provides REST endpoints for menu, orders, settings, exports, etc.
+* Hosts a WebSocket hub for real-time UI updates
+* Manages a background print queue that feeds the serial printer
+* Persists state via ``rpi/store.py`` snapshot + WAL files
 """
 import asyncio
 import os
@@ -22,11 +23,32 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from printer import PrinterAdapter
-from store import S, wal_append, snapshot_save, recover_to_latest, generate_order_no, enqueue_print, find_order, archive_find_order, archive_order_and_remove, get_pending_print_jobs, generate_sku_main, generate_sku_side
+from store import (
+    S,
+    wal_append,
+    snapshot_save,
+    recover_to_latest,
+    generate_order_no,
+    find_order,
+    archive_find_order,
+    archive_order_and_remove,
+    get_pending_print_jobs,
+    generate_sku_main,
+    generate_sku_side,
+    compute_order_total,
+    sales_summary_apply_order,
+    sales_summary_apply_cancellation,
+    sales_summary_reset,
+    sales_summary_recalculate,
+)
 
 load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
+
+ROOT_DIR = os.path.dirname(__file__)
+FRONTEND_DIR = os.path.join(ROOT_DIR, "data", "www")
+STORAGE_DIR = os.path.join(ROOT_DIR, "storage")
 
 API_PORT = int(os.environ.get("API_PORT", "8000"))
 SERIAL_DEV = os.environ.get("TTY_DEVICE", "/dev/ttyUSB-atomprinter")
@@ -34,7 +56,7 @@ SERIAL_BAUD = int(os.environ.get("BAUD", "9600"))
 
 app = FastAPI()
 # serve the frontend PWA from data/www
-app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "data", "www"), html=True), name="static")
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
 
 
 class WSManager:
@@ -44,6 +66,7 @@ class WSManager:
     async def connect(self, ws: WebSocket):
         await ws.accept()
         self.active.append(ws)
+        await ws.send_text(json.dumps({"type": "hello", "msg": "connected"}, ensure_ascii=False))
 
     def disconnect(self, ws: WebSocket):
         try:
@@ -64,8 +87,71 @@ ws_manager = WSManager()
 print_queue: asyncio.Queue = asyncio.Queue()
 
 
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def ensure_session_active() -> None:
+    S.ensure_session_defaults()
+    if not S.session.get('sessionId'):
+        S.session['sessionId'] = time.strftime('%Y-%m-%d-%p', time.localtime()).upper()
+        S.session['startedAt'] = _now_ts()
+
+
+async def broadcast_printer_status() -> None:
+    pending = get_pending_print_jobs()
+    S.printer['holdJobs'] = pending
+    payload = {
+        'type': 'printer.status',
+        'paperOut': S.printer.get('paperOut', False),
+        'holdJobs': pending,
+        'pendingJobs': pending,
+    }
+    await ws_manager.broadcast(payload)
+
+
+async def queue_print_job(order_no: str, reason: str = 'order') -> str:
+    job_id = str(uuid.uuid4())
+    order = find_order(order_no)
+    if order is not None:
+        order['printed'] = False
+    job = {
+        'id': job_id,
+        'orderNo': order_no,
+        'reason': reason,
+        'enqueuedAt': _now_ts(),
+    }
+    await print_queue.put(job)
+    await broadcast_printer_status()
+    wal_append(json.dumps({
+        'ts': _now_ts(),
+        'action': 'PRINT_ENQUEUE',
+        'orderNo': order_no,
+        'jobId': job_id,
+        'reason': reason,
+    }, ensure_ascii=False))
+    snapshot_save()
+    return job_id
+
+
+def order_to_api(order: dict) -> dict:
+    payload = json.loads(json.dumps(order, ensure_ascii=False))
+    payload['totalAmount'] = compute_order_total(order)
+    return payload
+
+
 @app.on_event("startup")
 async def startup_event():
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+    ok, msg = recover_to_latest()
+    if not ok and msg:
+        logger.warning("State recovery failed: %s", msg)
+    else:
+        logger.info("State recovery ok: lastTs=%s", msg)
+    S.create_initial_menu_if_empty()
+    S.ensure_sales_summary_defaults()
+    sales_summary_recalculate()
+    ensure_session_active()
     # open printer adapter and start background worker
     app.state.printer = PrinterAdapter(device=SERIAL_DEV, baud=SERIAL_BAUD)
     app.state.worker_task = asyncio.create_task(print_worker())
@@ -90,23 +176,29 @@ async def api_ping():
 @app.get('/api/menu')
 async def api_menu():
     # return menu and ETag-like catalogVersion
+    S.create_initial_menu_if_empty()
+    catalog_version = S.settings.get('catalogVersion', 1)
+    headers = {'ETag': f'W/"{catalog_version}"'}
     return JSONResponse({
-        'catalogVersion': S.settings.get('catalogVersion', 1),
+        'catalogVersion': catalog_version,
         'menu': S.menu
-    })
+    }, headers=headers)
 
 
 @app.get('/api/state')
 async def api_state(light: int = Query(0)):
     # light=1 returns compact orders
     S.create_initial_menu_if_empty()
+    ensure_session_active()
     light = int(light)
     menu = [] if light else S.menu
     orders = S.orders[-60:] if light else S.orders
+    printer = dict(S.printer)
+    printer['pendingJobs'] = get_pending_print_jobs()
     return JSONResponse({
         'settings': S.settings,
         'session': S.session,
-        'printer': S.printer,
+        'printer': printer,
         'menu': menu,
         'orders': orders
     })
@@ -132,6 +224,104 @@ async def api_orders_update(request: Request):
     snapshot_save()
     await ws_manager.broadcast({"type":"order.updated","orderNo":orderNo,"status":newStatus})
     return JSONResponse({'ok':True})
+
+
+@app.post('/api/orders/cancel')
+async def api_orders_cancel(request: Request):
+    body = await request.json()
+    order_no = body.get('orderNo')
+    if not order_no:
+        return JSONResponse({'error': 'Missing orderNo'}, status_code=400)
+    order = find_order(order_no)
+    if not order:
+        return JSONResponse({'error': 'Order not found'}, status_code=404)
+    if order.get('status') == 'CANCELLED':
+        return JSONResponse({'ok': True, 'orderNo': order_no})
+    reason = body.get('reason')
+    order['status'] = 'CANCELLED'
+    if reason:
+        order['cancelReason'] = reason
+    order['pickup_called'] = False
+    order['picked_up'] = False
+    sales_summary_apply_cancellation(order)
+    wal_append(json.dumps({
+        'ts': _now_ts(),
+        'action': 'ORDER_CANCEL',
+        'orderNo': order_no,
+        'reason': reason,
+    }, ensure_ascii=False))
+    snapshot_save()
+    await ws_manager.broadcast({'type': 'order.updated', 'orderNo': order_no, 'status': 'CANCELLED'})
+    await broadcast_printer_status()
+    return JSONResponse({'ok': True, 'orderNo': order_no})
+
+
+@app.post('/api/orders/reprint')
+async def api_orders_reprint(request: Request):
+    body = await request.json()
+    order_no = body.get('orderNo')
+    if not order_no:
+        return JSONResponse({'error': 'Missing orderNo'}, status_code=400)
+    order = find_order(order_no)
+    if not order:
+        return JSONResponse({'error': 'Order not found'}, status_code=404)
+    if order.get('status') == 'CANCELLED':
+        return JSONResponse({'error': 'Order cancelled'}, status_code=400)
+    await queue_print_job(order_no, reason='reprint')
+    wal_append(json.dumps({
+        'ts': _now_ts(),
+        'action': 'ORDER_REPRINT',
+        'orderNo': order_no,
+    }, ensure_ascii=False))
+    return JSONResponse({'ok': True, 'orderNo': order_no, 'message': 'Reprint queued'})
+
+
+@app.get('/api/orders/{orderNo}')
+async def api_orders_get(orderNo: str):
+    order = find_order(orderNo)
+    if not order:
+        return JSONResponse({'error': 'Order not found'}, status_code=404)
+    return JSONResponse(order_to_api(order))
+
+
+@app.patch('/api/orders/{orderNo}')
+async def api_orders_patch(orderNo: str, request: Request):
+    body = await request.json()
+    new_status = body.get('status')
+    if not new_status:
+        return JSONResponse({'error': 'Missing status'}, status_code=400)
+    order = find_order(orderNo)
+    if not order:
+        return JSONResponse({'error': 'Order not found'}, status_code=404)
+
+    notify_type = 'order.updated'
+    previous_status = order.get('status')
+    order['status'] = new_status
+    if new_status in ('DONE', 'COOKED'):
+        order['cooked'] = True
+        order['pickup_called'] = True
+        notify_type = 'order.cooked'
+    elif new_status in ('READY', 'PICKED'):
+        order['picked_up'] = True
+        order['pickup_called'] = False
+        notify_type = 'order.picked'
+        if not archive_order_and_remove(orderNo):
+            logger.warning("Failed to archive order %s", orderNo)
+    elif new_status == 'CANCELLED' and previous_status != 'CANCELLED':
+        order['pickup_called'] = False
+        order['picked_up'] = False
+        sales_summary_apply_cancellation(order)
+
+    wal_append(json.dumps({
+        'ts': _now_ts(),
+        'action': 'ORDER_UPDATE',
+        'orderNo': orderNo,
+        'status': new_status,
+    }, ensure_ascii=False))
+    snapshot_save()
+    await ws_manager.broadcast({'type': notify_type, 'orderNo': orderNo, 'status': new_status})
+    await broadcast_printer_status()
+    return JSONResponse({'ok': True})
 
 
 @app.get('/api/orders/detail')
@@ -205,7 +395,7 @@ async def api_printer_status():
 @app.post('/api/printer/paper-replaced')
 async def api_printer_paper_replaced():
     S.printer['paperOut'] = False
-    await ws_manager.broadcast({'type':'printer.status','paperOut': False, 'holdJobs': S.printer.get('holdJobs',0)})
+    await broadcast_printer_status()
     return JSONResponse({'ok':True})
 
 
@@ -437,11 +627,29 @@ async def api_export_sales_summary_lite():
 
 @app.get('/api/system/memory')
 async def api_system_memory():
-    # best-effort memory info
+    # best-effort memory info using /proc/meminfo
     try:
-        import psutil
-        mem = psutil.virtual_memory()
-        return JSONResponse({'freeHeap': int(mem.available), 'total': int(mem.total)})
+        meminfo = {}
+        with open('/proc/meminfo', 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.split(':', 1)
+                if len(parts) != 2:
+                    continue
+                key = parts[0].strip()
+                value = parts[1].strip().split()[0]
+                try:
+                    meminfo[key] = int(value) * 1024
+                except Exception:
+                    continue
+        total = meminfo.get('MemTotal', 0)
+        available = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
+        response = {
+            'freeHeap': int(available),
+            'minFreeHeap': int(available),
+            'maxAllocHeap': int(available),
+            'total': int(total),
+        }
+        return JSONResponse(response)
     except Exception:
         return JSONResponse({'freeHeap': 0, 'total': 0})
 
@@ -450,6 +658,11 @@ async def api_system_memory():
 async def api_recover():
     ok, msg = recover_to_latest()
     if ok:
+        S.create_initial_menu_if_empty()
+        S.ensure_sales_summary_defaults()
+        sales_summary_recalculate()
+        ensure_session_active()
+        await broadcast_printer_status()
         await ws_manager.broadcast({'type':'sync.snapshot'})
         return JSONResponse({'ok':True, 'lastTs': msg})
     else:
@@ -465,12 +678,19 @@ async def api_time_set(request: Request):
     # Attempt to set system time (may require sudo)
     try:
         import subprocess
-        ts = time.gmtime(epoch)
-        formatted = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(epoch))
-        # requires sudo privileges on Pi; best-effort
-        subprocess.run(['sudo','date','-s', formatted], check=True)
+
+        if hasattr(os, 'geteuid') and os.geteuid() == 0:
+            cmd = ['date', '-u', f'@{epoch}']
+        else:
+            cmd = ['sudo', 'date', '-u', f'@{epoch}']
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            stderr = (result.stderr or '').strip()
+            raise RuntimeError(stderr or 'date command failed')
         return JSONResponse({'ok':True})
     except Exception as e:
+        logger.warning("Failed to set system time: %s", e)
         return JSONResponse({'ok':False, 'error': str(e)}, status_code=500)
 
 
@@ -485,8 +705,20 @@ async def api_settings_system(request: Request):
     if 'numbering' in body:
         num = body['numbering']
         S.settings.setdefault('numbering', {})
-        if 'min' in num: S.settings['numbering']['min'] = num['min']
-        if 'max' in num: S.settings['numbering']['max'] = num['max']
+        if 'min' in num:
+            try:
+                min_val = int(num['min'])
+            except Exception:
+                min_val = S.settings['numbering'].get('min', 1)
+            S.settings['numbering']['min'] = min_val
+            if S.session.get('nextOrderSeq', 1) < min_val:
+                S.session['nextOrderSeq'] = min_val
+        if 'max' in num:
+            try:
+                max_val = int(num['max'])
+            except Exception:
+                max_val = S.settings['numbering'].get('max', 9999)
+            S.settings['numbering']['max'] = max_val
     snapshot_save()
     return JSONResponse({'ok':True})
 
@@ -494,16 +726,20 @@ async def api_settings_system(request: Request):
 @app.post('/api/session/end')
 async def api_session_end():
     S.orders.clear()
+    S.archived_orders.clear()
+    sales_summary_reset()
     S.session['exported'] = False
-    S.session['nextOrderSeq'] = 1
-    S.session['sessionId'] = ''
-    S.session['startedAt'] = int(time.time())
+    numbering_min = S.settings.get('numbering', {}).get('min', 1)
+    S.session['nextOrderSeq'] = int(numbering_min)
+    S.session['sessionId'] = time.strftime('%Y-%m-%d-%p', time.localtime()).upper()
+    S.session['startedAt'] = _now_ts()
     S.printer['paperOut'] = False
     S.printer['overheat'] = False
     S.printer['holdJobs'] = 0
     snapshot_save()
-    wal_append(json.dumps({"ts": int(time.time()), "action": "SESSION_END"}, ensure_ascii=False))
+    wal_append(json.dumps({"ts": _now_ts(), "action": "SESSION_END"}, ensure_ascii=False))
     await ws_manager.broadcast({'type':'session.ended'})
+    await broadcast_printer_status()
     return JSONResponse({'ok':True})
 
 
@@ -522,11 +758,25 @@ async def api_system_reset():
         except Exception:
             pass
         S.menu.clear(); S.orders.clear(); S.archived_orders.clear()
-        S.session = {'sessionId':'','startedAt': int(time.time()), 'exported': False, 'nextOrderSeq':1}
+        S.settings = {
+            'catalogVersion': 1,
+            'chinchiro': {'enabled': False, 'multipliers': [1.0, 2.0], 'rounding': 0},
+            'store': {'name': 'My Store', 'nameRomaji': 'My Store', 'registerId': 'R1'},
+            'presaleEnabled': False,
+            'qrPrint': {'enabled': False, 'content': ''},
+            'numbering': {'min': 1, 'max': 9999},
+        }
+        sales_summary_reset()
+        S.session = {'sessionId':'', 'startedAt': _now_ts(), 'exported': False, 'nextOrderSeq': 1}
         S.printer = {'paperOut': False, 'overheat': False, 'holdJobs': 0}
+        S.next_sku_main = 1
+        S.next_sku_side = 1
+        S.create_initial_menu_if_empty()
+        ensure_session_active()
         snapshot_save()
         wal_append(json.dumps({"ts": int(time.time()), "action": "SYSTEM_RESET"}, ensure_ascii=False))
         await ws_manager.broadcast({'type':'system.reset'})
+        await broadcast_printer_status()
         return JSONResponse({'ok':True, 'message':'System reset'})
     except Exception as e:
         return JSONResponse({'ok':False, 'error': str(e)}, status_code=500)
@@ -554,53 +804,46 @@ async def debug_hello():
 @app.post("/api/orders")
 async def api_orders(request: Request):
     body = await request.json()
-    # handle reprint/cancel by path suffix
-    path = str(request.url.path)
     S.create_initial_menu_if_empty()
+    ensure_session_active()
 
-    if path.endswith('/reprint'):
-        orderNo = body.get('orderNo')
-        if not orderNo:
-            return JSONResponse({"error": "Missing orderNo"}, status_code=400)
-        o = find_order(orderNo)
-        if not o:
-            return JSONResponse({"error": "Order not found"}, status_code=404)
-        enqueue_print(o)
-        await ws_manager.broadcast({"type":"order.created","orderNo": orderNo})
-        return JSONResponse({"ok": True, "orderNo": orderNo})
+    items = body.get('items') if isinstance(body, dict) else []
+    if not isinstance(items, list):
+        items = body.get('lines', []) if isinstance(body, dict) else []
+    if not isinstance(items, list):
+        items = []
+    items_copy = json.loads(json.dumps(items, ensure_ascii=False)) if items else []
 
-    if path.endswith('/cancel'):
-        orderNo = body.get('orderNo')
-        reason = body.get('reason', '')
-        if not orderNo:
-            return JSONResponse({"error": "Missing orderNo"}, status_code=400)
-        o = find_order(orderNo)
-        if not o:
-            return JSONResponse({"error": "Order not found"}, status_code=404)
-        o['status'] = 'CANCELLED'
-        o['cancelReason'] = reason
-        wal_append(json.dumps({"ts": int(time.time()), "action": "ORDER_CANCEL", "orderNo": orderNo, "cancelReason": reason}, ensure_ascii=False))
-        snapshot_save()
-        await ws_manager.broadcast({"type": "order.updated", "orderNo": orderNo, "status": "CANCELLED"})
-        return JSONResponse({"ok": True, "orderNo": orderNo})
-
-    # create order
-    order = body
     order_no = generate_order_no()
+    now = _now_ts()
     order_obj = {
         'orderNo': order_no,
-        'status': 'CREATED',
-        'ts': int(time.time()),
+        'status': body.get('status') or 'CREATED',
+        'ts': now,
         'printed': False,
         'cooked': False,
         'pickup_called': False,
         'picked_up': False,
-        'items': order.get('lines', []) if isinstance(order.get('lines', []), list) else order.get('items', [])
+        'items': items_copy,
     }
+
+    if isinstance(body, dict):
+        for key, value in body.items():
+            if key in ('items', 'lines', 'orderNo', 'status'):
+                continue
+            if key not in order_obj:
+                order_obj[key] = value
+
     S.orders.append(order_obj)
-    wal_append(json.dumps({"ts": int(time.time()), "action": "ORDER_CREATE", "orderNo": order_no, "order": order_obj}, ensure_ascii=False))
-    enqueue_print(order_obj)
+    sales_summary_apply_order(order_obj)
+    wal_append(json.dumps({
+        'ts': now,
+        'action': 'ORDER_CREATE',
+        'orderNo': order_no,
+        'order': order_obj,
+    }, ensure_ascii=False))
     snapshot_save()
+    await queue_print_job(order_no, reason='new')
     await ws_manager.broadcast({"type": "order.created", "orderNo": order_no})
     return JSONResponse({"orderNo": order_no})
 
@@ -624,30 +867,42 @@ async def print_worker():
     via PrinterAdapter.print_text(). In real usage, you'd render text/bitmap
     similar to the ESP32 implementation.
     """
-    printer: PrinterAdapter = app.state.printer
     loop = asyncio.get_running_loop()
     while True:
         job = await print_queue.get()
         job_id = job.get("id")
+        order_no = job.get('orderNo')
         try:
-            text = json.dumps(job["order"], ensure_ascii=False, indent=0)
-            # send blocking IO in executor
-            # prefer raster receipt printing when possible
-            printer = app.state.printer
-            job_order = job.get('order')
-            logo_path = os.path.join(os.path.dirname(__file__), 'storage', 'logo.png')
+            order = find_order(order_no)
+            if not order:
+                raise RuntimeError(f"Order {order_no} missing")
+            printer: PrinterAdapter = app.state.printer
+            logo_path = os.path.join(STORAGE_DIR, 'logo.png')
+            printed_mode = 'raster'
+            order_payload = json.loads(json.dumps(order, ensure_ascii=False))
             try:
-                await loop.run_in_executor(None, printer.print_receipt, job_order, logo_path, os.environ.get('FONT_PATH'))
-                await ws_manager.broadcast({"event": "printed", "id": job_id})
-                logger.info("Printed job %s (raster)", job_id)
-            except Exception:
-                # fallback to text printing
-                await loop.run_in_executor(None, printer.print_text, text)
-                await ws_manager.broadcast({"event": "printed", "id": job_id})
-                logger.info("Printed job %s (text fallback)", job_id)
+                await loop.run_in_executor(None, printer.print_receipt, order_payload, logo_path, os.environ.get('FONT_PATH'))
+            except Exception as raster_error:
+                printed_mode = 'text'
+                fallback_text = json.dumps(order_payload, ensure_ascii=False)
+                await loop.run_in_executor(None, printer.print_text, fallback_text)
+                logger.warning("Raster print failed for order %s (%s); used text fallback", order_no, raster_error)
+
+            order['printed'] = True
+            snapshot_save()
+            wal_append(json.dumps({
+                'ts': _now_ts(),
+                'action': 'PRINT_DONE',
+                'orderNo': order_no,
+                'jobId': job_id,
+                'mode': printed_mode,
+            }, ensure_ascii=False))
+            await ws_manager.broadcast({'type': 'order.updated', 'orderNo': order_no, 'status': order.get('status'), 'printed': True})
+            await broadcast_printer_status()
+            logger.info("Printed job %s for order %s via %s", job_id, order_no, printed_mode)
         except Exception as e:
-            logger.exception("Printing failed for %s: %s", job_id, e)
-            await ws_manager.broadcast({"event": "print_failed", "id": job_id, "error": str(e)})
+            logger.exception("Printing failed for %s/%s: %s", job_id, order_no, e)
+            await ws_manager.broadcast({'event': 'print_failed', 'id': job_id, 'orderNo': order_no, 'error': str(e)})
         finally:
             print_queue.task_done()
 

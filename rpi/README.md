@@ -1,53 +1,60 @@
-# rpi: Raspberry Pi 用 サーバー (最小実装)
+# rpi: Raspberry Pi 用サーバー
 
-このフォルダには Raspberry Pi 上で動かすための最小限の FastAPI サーバー実装が含まれます。
+このディレクトリには Atom Printer + Atom Lite で動作していた KDS を Raspberry Pi 上で再現するための
+FastAPI 実装とセットアップ用ファイルが含まれます。
 
-含まれるファイル:
-- `requirements.txt` - 必要パッケージ
-- `app.py` - FastAPI アプリ (静的配信 + /api + /ws + バックグラウンド印刷ワーカー)
-- `printer.py` - pyserial を使う簡易プリンタアダプタ
+## 含まれるもの
 
-使い方(ラズパイ側):
+- `app.py` – REST / WebSocket / 印刷キューを提供する FastAPI アプリ
+- `printer.py` – シリアルプリンタへの ESC/POS 出力アダプタ
+- `data/www/` – KDS フロントエンド PWA（ESP32 版と同一構成）
+- `store.py` – スナップショット + WAL による永続化レイヤー
+- `setup/` – hostapd / dnsmasq / iptables のサンプル設定
+- `.env.example` – サービス起動用の環境変数テンプレート
 
-1. リポジトリを /home/pi/atomprinter に配置
-2. Python 仮想環境を作成・アクティベート
+## セットアップ手順
 
-```powershell
+```bash
+cd /home/pi/atomprinter
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install -r rpi/requirements.txt
+cp rpi/.env.example .env
+# シリアルデバイスやフォントパスが異なる場合は .env を編集
 ```
 
-## systemd と AP の簡単手順（概要）
+### ソフト AP (hostapd + dnsmasq)
 
-1. `.env` を作成（下の `.env.example` を参照）
-2. `rpi/atomprinter.service` を `/etc/systemd/system/atomprinter.service` にコピーしてパス・ユーザーを確認
-3. hostapd/dnsmasq の設定は本 README の後半を参照（手動での設定は環境に依存します）
-4. systemd をリロードして有効化
+`rpi/setup/README.md` に、`wlan0` を固定 IP (例: `192.168.50.1/24`) に設定し、NAT を有効化する手順をまとめています。
+以下のファイルをベースに `/etc/` 配下へコピーしてください。
 
-```powershell
+- `hostapd.conf` → `/etc/hostapd/hostapd.conf`
+- `dnsmasq.conf` → `/etc/dnsmasq.d/kds.conf`
+- `dhcpcd.conf` の内容 → `/etc/dhcpcd.conf` へ追記
+- `iptables.sh` → NAT 設定スクリプト（実行後に永続化）
+
+### systemd サービス
+
+```bash
+sudo cp rpi/atomprinter.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable atomprinter.service
-sudo systemctl start atomprinter.service
+sudo systemctl enable --now atomprinter.service
 ```
 
-## .env の例
-設定の最小例は `rpi/.env.example` を参照してください。主な項目:
-- TTY_DEVICE: /dev/ttyUSB0 など実機の接続先
-- BAUD: 115200
-- API_PORT: 8000
+サービスは `/home/pi/atomprinter/.venv/bin/uvicorn` を想定しています。仮想環境の場所を変える場合は
+`atomprinter.service` を編集してください。
 
-## 注意
-この実装は「ラズパイ上で素早く動作確認できる」ことを目的にしており、実運用では hostapd/dnsmasq の設定、systemd ユニットのユーザーや仮想環境パス、ログローテーションなどを適切に調整してください。
+### 手動起動 (デバッグ)
 
-3. 環境変数ファイル `.env` をプロジェクトルートに置く（`rpi/setup/.env.example` を参照）
-4. systemd か手動で起動
-
-手動起動の例（テスト用）:
-
-```powershell
-# 仮想環境内から
+```bash
+source .venv/bin/activate
 python -m uvicorn rpi.app:app --host 0.0.0.0 --port 8000
 ```
 
-注: サンプル実装は最小限です。印刷内容のフォーマット（ESC/POS ラスター印刷など）は ESP32 側の実装に合わせて移植してください。
+## 動作仕様のポイント
+
+- `/api/*` エンドポイントおよび WebSocket イベントは Atom Lite (ESP32) 版と互換です。
+- 受注・メニュー・売上サマリは `rpi/storage/` に `snapshot.json` + `wal.log` として保存されます。
+- 印刷キューはバックグラウンドタスクで処理され、失敗時はテキストフォールバックを自動実行します。
+- `FONT_PATH` を設定すると日本語対応フォントでレシート画像を描画できます。未設定の場合は ASCII のみのテキスト印字です。
+- 実運用ではログローテーション・バックアップ・監視などを環境に合わせて整備してください。

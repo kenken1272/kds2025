@@ -27,21 +27,64 @@ class Store:
             'chinchiro': {'enabled': False, 'multipliers': [1.0, 2.0], 'rounding': 0},
             'store': {'name': 'My Store', 'nameRomaji': 'My Store', 'registerId': 'R1'},
             'presaleEnabled': False,
-            'qrPrint': {'enabled': False, 'content': ''}
+            'qrPrint': {'enabled': False, 'content': ''},
+            'numbering': {'min': 1, 'max': 9999},
         }
-        self.session = {'sessionId': '', 'startedAt': int(time.time()), 'exported': False, 'nextOrderSeq': 1}
+        now = int(time.time())
+        self.session = {'sessionId': '', 'startedAt': now, 'exported': False, 'nextOrderSeq': 1}
         self.printer = {'paperOut': False, 'overheat': False, 'holdJobs': 0}
-        self.sales_summary = {'lastUpdated': int(time.time()), 'confirmedOrders': 0, 'cancelledOrders': 0, 'revenue': 0, 'cancelledAmount': 0}
-    # SKU counters for generated SKUs
-    self.next_sku_main = 1
-    self.next_sku_side = 1
+        self.sales_summary = {
+            'lastUpdated': now,
+            'confirmedOrders': 0,
+            'cancelledOrders': 0,
+            'revenue': 0,
+            'cancelledAmount': 0,
+        }
+        # SKU counters for generated SKUs
+        self.next_sku_main = 1
+        self.next_sku_side = 1
 
     def create_initial_menu_if_empty(self):
         if not self.menu:
             self.menu = [
-                {'sku':'M001','name':'Teriyaki Burger','nameRomaji':'Teriyaki Burger','category':'MAIN','active':True,'price_normal':800,'price_presale':700,'presale_discount_amount':0,'price_single':800,'price_as_side':0},
-                {'sku':'S001','name':'Fries','nameRomaji':'Fries','category':'SIDE','active':True,'price_single':200,'price_as_side':200}
+                {
+                    'sku': 'M001',
+                    'name': 'Teriyaki Burger',
+                    'nameRomaji': 'Teriyaki Burger',
+                    'category': 'MAIN',
+                    'active': True,
+                    'price_normal': 800,
+                    'price_presale': 700,
+                    'presale_discount_amount': 0,
+                    'price_single': 800,
+                    'price_as_side': 0,
+                },
+                {
+                    'sku': 'S001',
+                    'name': 'Fries',
+                    'nameRomaji': 'Fries',
+                    'category': 'SIDE',
+                    'active': True,
+                    'price_single': 200,
+                    'price_as_side': 200,
+                },
             ]
+            self.next_sku_main = 2
+            self.next_sku_side = 2
+
+    def ensure_sales_summary_defaults(self):
+        now = int(time.time())
+        self.sales_summary.setdefault('lastUpdated', now)
+        self.sales_summary.setdefault('confirmedOrders', 0)
+        self.sales_summary.setdefault('cancelledOrders', 0)
+        self.sales_summary.setdefault('revenue', 0)
+        self.sales_summary.setdefault('cancelledAmount', 0)
+
+    def ensure_session_defaults(self):
+        self.session.setdefault('sessionId', '')
+        self.session.setdefault('startedAt', int(time.time()))
+        self.session.setdefault('exported', False)
+        self.session.setdefault('nextOrderSeq', 1)
 
 S = Store()
 
@@ -68,6 +111,8 @@ def snapshot_save() -> bool:
                 'session': S.session,
                 'printer': S.printer,
                 'sales_summary': S.sales_summary,
+                'next_sku_main': S.next_sku_main,
+                'next_sku_side': S.next_sku_side,
             }
             with open(_snapshot_path(), 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -92,6 +137,14 @@ def recover_to_latest() -> Tuple[bool, Optional[str]]:
                     S.session = data.get('session', S.session)
                     S.printer = data.get('printer', S.printer)
                     S.sales_summary = data.get('sales_summary', S.sales_summary)
+                    S.next_sku_main = data.get('next_sku_main', S.next_sku_main)
+                    S.next_sku_side = data.get('next_sku_side', S.next_sku_side)
+                    S.ensure_sales_summary_defaults()
+                    S.ensure_session_defaults()
+                    if not isinstance(S.next_sku_main, int) or S.next_sku_main <= 0:
+                        S.next_sku_main = _infer_next_sku(S.menu, prefix='M', default=1)
+                    if not isinstance(S.next_sku_side, int) or S.next_sku_side <= 0:
+                        S.next_sku_side = _infer_next_sku(S.menu, prefix='S', default=1)
             # replay wal (best-effort; here we just append to archived log for trace)
             last_ts = None
             if os.path.exists(_wal_path()):
@@ -169,3 +222,113 @@ def generate_sku_side() -> str:
         v = S.next_sku_side
         S.next_sku_side += 1
         return f"S{v:03d}"
+
+
+def _infer_next_sku(menu: List[Dict], prefix: str, default: int) -> int:
+    highest = default - 1
+    for item in menu:
+        sku = str(item.get('sku') or '')
+        if sku.startswith(prefix) and len(sku) > 1:
+            tail = sku[1:]
+            try:
+                val = int(tail)
+            except ValueError:
+                continue
+            if val > highest:
+                highest = val
+    return max(highest + 1, default)
+
+
+def compute_order_total(order: Dict) -> int:
+    total = 0
+    for it in order.get('items', []):
+        unit = it.get('unitPriceApplied')
+        if unit is None:
+            unit = it.get('unitPrice')
+        if unit is None:
+            unit = it.get('price')
+        if unit is None:
+            unit = it.get('price_single')
+        if unit is None:
+            unit = 0
+        qty = it.get('qty', 1) or 1
+        discount = it.get('discountValue') or it.get('discount', 0) or 0
+        try:
+            subtotal = int(unit) * int(qty) - int(discount)
+        except Exception:
+            try:
+                subtotal = float(unit) * float(qty) - float(discount)
+            except Exception:
+                subtotal = 0
+        total += int(subtotal)
+    if total < 0:
+        total = 0
+    return total
+
+
+def sales_summary_apply_order(order: Dict):
+    with _lock:
+        S.ensure_sales_summary_defaults()
+        total = compute_order_total(order)
+        status = order.get('status', '')
+        if status == 'CANCELLED':
+            sales_summary_apply_cancellation(order)
+            return
+        S.sales_summary['confirmedOrders'] = int(S.sales_summary.get('confirmedOrders', 0)) + 1
+        S.sales_summary['revenue'] = int(S.sales_summary.get('revenue', 0)) + total
+        S.sales_summary['lastUpdated'] = int(time.time())
+
+
+def sales_summary_apply_cancellation(order: Dict):
+    with _lock:
+        S.ensure_sales_summary_defaults()
+        total = compute_order_total(order)
+        confirmed = int(S.sales_summary.get('confirmedOrders', 0))
+        if confirmed > 0:
+            S.sales_summary['confirmedOrders'] = confirmed - 1
+        S.sales_summary['cancelledOrders'] = int(S.sales_summary.get('cancelledOrders', 0)) + 1
+        revenue = int(S.sales_summary.get('revenue', 0)) - total
+        if revenue < 0:
+            revenue = 0
+        S.sales_summary['revenue'] = revenue
+        cancelled_amount = int(S.sales_summary.get('cancelledAmount', 0)) + total
+        if cancelled_amount < 0:
+            cancelled_amount = 0
+        S.sales_summary['cancelledAmount'] = cancelled_amount
+        S.sales_summary['lastUpdated'] = int(time.time())
+
+
+def sales_summary_reset():
+    with _lock:
+        now = int(time.time())
+        S.sales_summary = {
+            'lastUpdated': now,
+            'confirmedOrders': 0,
+            'cancelledOrders': 0,
+            'revenue': 0,
+            'cancelledAmount': 0,
+        }
+
+
+def sales_summary_recalculate():
+    with _lock:
+        now = int(time.time())
+        confirmed = 0
+        cancelled = 0
+        revenue = 0
+        cancelled_amount = 0
+        for order in S.orders + S.archived_orders:
+            total = compute_order_total(order)
+            if order.get('status') == 'CANCELLED':
+                cancelled += 1
+                cancelled_amount += total
+            else:
+                confirmed += 1
+                revenue += total
+        S.sales_summary = {
+            'lastUpdated': now,
+            'confirmedOrders': confirmed,
+            'cancelledOrders': cancelled,
+            'revenue': revenue,
+            'cancelledAmount': cancelled_amount,
+        }
