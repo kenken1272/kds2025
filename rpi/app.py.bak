@@ -967,20 +967,3 @@ if not any(getattr(r, 'path', None) == '/api/print/text' for r in app.routes) or
         return {"ok": True, "len": len(payload)}
 
     app.include_router(api)
-
-# ===== /api ルータ登録 & printer 注入 =====
-from . import api_routes as _api_routes
-
-def _wire_printer_to_api(printer_adapter):
-    def _get_printer():
-        return printer_adapter
-    _api_routes.get_printer = _get_printer  # api_routes 内から参照
-
-try:
-    _wire_printer_to_api(app.state.printer)
-except Exception as e:
-    import logging as _logging
-    _logging.getLogger("atomprinter.app").warning("printer not yet available: %s", e)
-
-app.include_router(_api_routes.router)
-# =========================================
